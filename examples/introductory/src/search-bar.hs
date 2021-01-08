@@ -9,7 +9,6 @@ import           Foreign.Ptr (castPtr)
 
 import           Data.GI.Base
 import qualified GI.Gdk as Gdk
-import qualified GI.Gio as Gio
 import qualified GI.Gtk as Gtk
 
 toEvent :: Gdk.EventKey -> IO Gdk.Event
@@ -51,9 +50,7 @@ appActivateHandler app = do
 
 main :: IO ()
 main = do
-  app <- new Gtk.Application [ #applicationId := "haskell-gi.examples.search-bar"
-                             , #flags := [ Gio.ApplicationFlagsFlagsNone ]
-                             ]
+  app <- new Gtk.Application [#applicationId := "haskell-gi.examples.search-bar"]
   on app #activate $ do appActivateHandler app
 
   #run app Nothing        

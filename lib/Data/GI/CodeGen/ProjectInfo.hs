@@ -14,6 +14,9 @@ module Data.GI.CodeGen.ProjectInfo
     , standardDeps
     ) where
 
+#if !MIN_VERSION_base(4,11,0)
+import Data.Monoid ((<>))
+#endif
 import Data.Text (Text)
 import qualified Data.Text as T (unlines)
 
@@ -24,7 +27,7 @@ authors :: Text
 authors = "Will Thompson, Iñaki García Etxebarria and Jonas Platte"
 
 maintainers :: Text
-maintainers = "Iñaki García Etxebarria (garetxe@gmail.com)"
+maintainers = "Iñaki García Etxebarria"
 
 license :: Text
 license = "LGPL-2.1"
@@ -36,12 +39,12 @@ defaultExtensions = ["NoImplicitPrelude", "ScopedTypeVariables", "CPP",
                      "OverloadedStrings", "NegativeLiterals", "ConstraintKinds",
                      "TypeFamilies", "MultiParamTypeClasses", "KindSignatures",
                      "FlexibleInstances", "UndecidableInstances", "DataKinds",
-                     "FlexibleContexts"]
+                     "FlexibleContexts", "UndecidableSuperClasses"]
 
 -- | Extensions that will be used in some modules, but we do not wish
 -- to turn on by default.
 otherExtensions :: [Text]
-otherExtensions = ["PatternSynonyms", "ViewPatterns"]
+otherExtensions = ["PatternSynonyms", "ViewPatterns", "TypeApplications"]
 
 -- | Default options for GHC when compiling generated code.
 ghcOptions :: [Text]
@@ -66,8 +69,25 @@ standardDeps = ["bytestring >= 0.10 && < 1",
 category :: Text
 category = "Bindings"
 
-licenseText :: Text
-licenseText = T.unlines
+staticLinkingException :: Text -> Text
+staticLinkingException name = T.unlines
+ ["The " <> name <> " library and included works are provided under the terms of the"
+ ,"GNU Library General Public License (LGPL) version 2.1 with the following"
+ ,"exception:"
+ ,""
+ ,"Static linking of applications or any other source to the " <> name <> " library"
+ ,"does not constitute a modified or derivative work and does not require"
+ ,"the author(s) to provide source code for said work, to link against the"
+ ,"shared " <> name <> " libraries, or to link their applications against a"
+ ,"user-supplied version of " <> name <> ". If you link applications to a modified"
+ ,"version of " <> name <> ", then the changes to " <> name <> " must be provided under the"
+ ,"terms of the LGPL."
+ ,""
+ ,"----------------------------------------------------------------------------"
+ ,""]
+
+licenseText :: Text -> Text
+licenseText name = staticLinkingException name <> T.unlines
  ["                  GNU LESSER GENERAL PUBLIC LICENSE"
  ,"                       Version 2.1, February 1999"
  ,""

@@ -13,9 +13,35 @@ ignore io_modules_load_all_in_directory_with_scope
 # Properly marked as filename in recent Gio versions.
 set-attr Gio/AppInfo/get_executable/@return-value/@type name filename
 
+# The return value is nullable, but it is not marked as such.
+set-attr Gio/AppInfo/get_icon/@return-value nullable 1
+
 # Return value is nullable, but not marked as such.
 # https://github.com/haskell-gi/haskell-gi/issues/139
 set-attr Gio/Volume/get_mount/@return-value nullable 1
+
+# Return value is nullable, but is only marked as such in recent
+# versions.
+set-attr Gio/InetAddress/new_from_string/@return-value nullable 1
+
+# These are included by mistake in the introspection data of
+# glib-2.60.0, but they are linux-specific.
+# See https://github.com/haskell-gi/haskell-gi/issues/218
+if osx
+   delete-node Gio/DesktopAppInfo
+   delete-node Gio/DesktopAppInfoClass
+   delete-node Gio/DesktopAppInfoLookup
+   delete-node Gio/DesktopAppInfoLookupIface
+   delete-node Gio/DesktopAppLaunchCallback
+endif
+
+if windows
+   delete-node Gio/DesktopAppInfo
+   delete-node Gio/DesktopAppInfoClass
+   delete-node Gio/DesktopAppInfoLookup
+   delete-node Gio/DesktopAppInfoLookupIface
+   delete-node Gio/DesktopAppLaunchCallback
+endif
 
 # The return value can be null, but it is not marked as such in the
 # introspection data, leading to a rather confusing error message:
@@ -61,7 +87,20 @@ if windows
    ignore UnixFDList.new_from_array
    ignore DBusProxy.call_with_unix_fd_list_finish
    ignore DBusProxy.call_with_unix_fd_list_sync
-   ignore DBusProxy.call_with_unix_fd_list   
+   ignore DBusProxy.call_with_unix_fd_list
+endif
+
+# Wrongly included in the OSX introspection data, see
+# https://github.com/haskell-gi/haskell-gi/issues/227
+if osx
+   delete-node Gio/content_type_get_mime_dirs
+   delete-node Gio/content_type_set_mime_dirs
+endif
+
+# ... and similarly in windows
+if windows
+   delete-node Gio/content_type_get_mime_dirs
+   delete-node Gio/content_type_set_mime_dirs
 endif
 
 # Generated from gio 2.48.0 with xsltproc Nullable.xslt Gio-2.0.gir

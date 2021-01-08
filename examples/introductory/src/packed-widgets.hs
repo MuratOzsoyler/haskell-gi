@@ -5,7 +5,6 @@
 module Main where
 
 import Data.Int
-import Data.Monoid ( (<>) )
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 
@@ -52,9 +51,7 @@ activateApp app = do
 
 main :: IO ()
 main = do
-  app <- new Gtk.Application [ #applicationId := "haskell-gi.examples.packed-widgets"
-                             , #flags := [ Gio.ApplicationFlagsFlagsNone ]
-                             ]
+  app <- new Gtk.Application [#applicationId := "haskell-gi.examples.packed-widgets"]
   on app #activate $ activateApp app
   Gio.applicationRun app Nothing
 

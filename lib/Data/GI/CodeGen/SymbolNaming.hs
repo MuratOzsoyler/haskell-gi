@@ -3,11 +3,11 @@ module Data.GI.CodeGen.SymbolNaming
     ( lowerName
     , lowerSymbol
     , upperName
-    , noName
     , escapedArgName
 
     , classConstraint
     , typeConstraint
+    , safeCast
 
     , hyphensToCamelCase
     , underscoresToCamelCase
@@ -21,18 +21,23 @@ module Data.GI.CodeGen.SymbolNaming
     , callbackHaskellToForeignWithClosures
     , callbackClosureGenerator
 
+    , signalHaskellName
+    , signalInfoName
+
     , submoduleLocation
     , qualifiedAPI
     , qualifiedSymbol
+    , normalizedAPIName
     ) where
 
+#if !MIN_VERSION_base(4,11,0)
 import Data.Monoid ((<>))
+#endif
 import Data.Text (Text)
 import qualified Data.Text as T
 
 import Data.GI.CodeGen.API
-import Data.GI.CodeGen.Code (CodeGen, group, line, exportDecl,
-                             qualified, getAPI)
+import Data.GI.CodeGen.Code (CodeGen, qualified, getAPI)
 import Data.GI.CodeGen.ModulePath (ModulePath, (/.), toModulePath)
 import Data.GI.CodeGen.Type (Type(TInterface))
 import Data.GI.CodeGen.Util (lcFirst, ucFirst, modifyQualified)
@@ -41,6 +46,11 @@ import Data.GI.CodeGen.Util (lcFirst, ucFirst, modifyQualified)
 -- (which should correspond to a valid `TInterface`).
 classConstraint :: Name -> CodeGen Text
 classConstraint n@(Name _ s) = qualifiedSymbol ("Is" <> s) n
+
+-- | Return a qualified form of the function mapping instances of
+-- @IsX@ to haskell values of type @X@.
+safeCast :: Name -> CodeGen Text
+safeCast n@(Name _ s) = qualifiedSymbol ("to" <> ucFirst s) n
 
 -- | Same as `classConstraint`, but applicable directly to a type. The
 -- type should be a `TInterface`, otherwise an error will be raised.
@@ -142,29 +152,31 @@ submoduleLocation n (APIObject _) = "Objects" /. upperName n
 submoduleLocation n (APIStruct _) = "Structs" /. upperName n
 submoduleLocation n (APIUnion _) = "Unions" /. upperName n
 
+-- | Construct the Haskell version of the name associated to the given
+-- API.
+normalizedAPIName :: API -> Name -> Name
+normalizedAPIName (APIConst _) (Name ns name) = Name ns (ucFirst name)
+normalizedAPIName (APIFunction _) n = n
+normalizedAPIName (APICallback _) n@(Name ns _) = Name ns (upperName n)
+normalizedAPIName (APIEnum _) n@(Name ns _) = Name ns (upperName n)
+normalizedAPIName (APIFlags _) n@(Name ns _) = Name ns (upperName n)
+normalizedAPIName (APIInterface _) n@(Name ns _) = Name ns (upperName n)
+normalizedAPIName (APIObject _) n@(Name ns _) = Name ns (upperName n)
+normalizedAPIName (APIStruct _) n@(Name ns _) = Name ns (upperName n)
+normalizedAPIName (APIUnion _) n@(Name ns _) = Name ns (upperName n)
+
 -- | Return an identifier for the given interface type valid in the current
 -- module.
-qualifiedAPI :: Name -> CodeGen Text
-qualifiedAPI n@(Name ns _) = do
-  api <- getAPI (TInterface n)
-  qualified (toModulePath (ucFirst ns) <> submoduleLocation n api) n
+qualifiedAPI :: API -> Name -> CodeGen Text
+qualifiedAPI api n@(Name ns _) =
+  let normalized = normalizedAPIName api n
+  in qualified (toModulePath (ucFirst ns) <> submoduleLocation n api) normalized
 
 -- | Construct an identifier for the given symbol in the given API.
 qualifiedSymbol :: Text -> Name -> CodeGen Text
 qualifiedSymbol s n@(Name ns _) = do
   api <- getAPI (TInterface n)
   qualified (toModulePath (ucFirst ns) <> submoduleLocation n api) (Name ns s)
-
--- | Save a bit of typing for optional arguments in the case that we
--- want to pass Nothing.
-noName :: Text -> CodeGen ()
-noName name' = group $ do
-  -- We should use `writeHaddock` here, but it would give rise to a
-  -- cyclic import.
-  line $ "-- | A convenience alias for `Nothing` :: `Maybe` `" <> name' <> "`."
-  line $ "no" <> name' <> " :: Maybe " <> name'
-  line $ "no" <> name' <> " = Nothing"
-  exportDecl ("no" <> name')
 
 -- | Turn a hyphen-separated identifier into camel case.
 --
@@ -235,3 +247,15 @@ escapeReserved s
     | "set_" `T.isPrefixOf` s = s <> "_"
     | "get_" `T.isPrefixOf` s = s <> "_"
     | otherwise = s
+
+-- | Qualified name for the "(sigName, info)" tag for a given signal.
+signalInfoName :: Name -> Signal -> CodeGen Text
+signalInfoName n signal = do
+  let infoName = upperName n <> (ucFirst . signalHaskellName . sigName) signal
+                 <> "SignalInfo"
+  qualifiedSymbol infoName n
+
+-- | Return the name for the signal in Haskell CamelCase conventions.
+signalHaskellName :: Text -> Text
+signalHaskellName sn = let (w:ws) = T.split (== '-') sn
+                       in w <> T.concat (map ucFirst ws)

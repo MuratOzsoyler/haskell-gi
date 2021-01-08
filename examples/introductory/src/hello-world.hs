@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings, OverloadedLabels #-}
 
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
+
 {- Hello World example of GTK+ documentation. For information please refer to README -}
 
 module Main where

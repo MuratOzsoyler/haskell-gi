@@ -6,7 +6,6 @@ module Main where
 
 import           Control.Monad (when)
 import           Data.Maybe (fromJust)
-import           Data.Monoid ((<>))
 import           Data.Text (Text)
 import           Foreign.Ptr (castPtr)
 
@@ -138,7 +137,7 @@ appActivate app = do
 
 main :: IO ()
 main = do
-  app <- new Gtk.Application [ #applicationId := "haskell-gi.examples.action-namespace" ]
+  app <- new Gtk.Application [#applicationId := "haskell-gi.examples.action-namespace"]
   on app #activate $ appActivate app
 
   #run app Nothing

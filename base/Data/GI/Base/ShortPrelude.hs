@@ -20,7 +20,7 @@ module Data.GI.Base.ShortPrelude
     , module Data.GI.Base.Attributes
     , module Data.GI.Base.BasicTypes
     , module Data.GI.Base.BasicConversions
-    , module Data.GI.Base.Closure
+    , module Data.GI.Base.GClosure
     , module Data.GI.Base.Constructible
     , module Data.GI.Base.GError
     , module Data.GI.Base.GHashTable
@@ -29,7 +29,6 @@ module Data.GI.Base.ShortPrelude
     , module Data.GI.Base.GVariant
     , module Data.GI.Base.GValue
     , module Data.GI.Base.ManagedPtr
-    , module Data.GI.Base.Properties
     , module Data.GI.Base.Signals
     , module Data.GI.Base.Utils
 
@@ -46,7 +45,7 @@ module Data.GI.Base.ShortPrelude
     , (++)
     , (=<<)
     , (>=>)
-    , Bool(..)
+    , Bool()
     , Float
     , Double
     , undefined
@@ -78,8 +77,8 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.GI.Base.Attributes hiding (get, set)
 import Data.GI.Base.BasicTypes
 import Data.GI.Base.BasicConversions
-import Data.GI.Base.Closure
 import Data.GI.Base.Constructible
+import Data.GI.Base.GClosure (GClosure)
 import Data.GI.Base.GError
 import Data.GI.Base.GHashTable
 import Data.GI.Base.GObject
@@ -87,7 +86,6 @@ import Data.GI.Base.GParamSpec
 import Data.GI.Base.GVariant
 import Data.GI.Base.GValue
 import Data.GI.Base.ManagedPtr
-import Data.GI.Base.Properties
 import Data.GI.Base.Signals (SignalConnectMode(..), connectSignalFunPtr, SignalHandlerId, SignalInfo(..), GObjectNotifySignalInfo)
 import Data.GI.Base.Utils
 

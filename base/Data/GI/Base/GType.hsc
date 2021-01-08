@@ -1,11 +1,8 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Basic `GType`s.
 module Data.GI.Base.GType
-    ( GType(..)
-    , CGType
-
-    , gtypeName
-
-    , gtypeString
+    ( gtypeString
     , gtypePointer
     , gtypeInt
     , gtypeUInt
@@ -16,6 +13,7 @@ module Data.GI.Base.GType
     , gtypeFloat
     , gtypeDouble
     , gtypeBoolean
+    , gtypeError
     , gtypeGType
     , gtypeStrv
     , gtypeBoxed
@@ -23,26 +21,13 @@ module Data.GI.Base.GType
     , gtypeVariant
     , gtypeByteArray
     , gtypeInvalid
+
+    , gtypeStablePtr
     ) where
 
-import Data.Word
-import Foreign.C.String (CString, peekCString)
+import Data.GI.Base.BasicTypes (GType(..), CGType)
 
 #include <glib-object.h>
-
--- | A type identifier in the GLib type system. This is the low-level
--- type associated with the representation in memory, when using this
--- on the Haskell side use `GType` below.
-type CGType = #type GType
-
--- | A newtype for use on the haskell side.
-newtype GType = GType {gtypeToCGType :: CGType}
-
-foreign import ccall "g_type_name" g_type_name :: GType -> IO CString
-
--- | Get the name assigned to the given `GType`.
-gtypeName :: GType -> IO String
-gtypeName gtype = g_type_name gtype >>= peekCString
 
 {-| [Note: compile-time vs run-time GTypes]
 
@@ -68,19 +53,19 @@ gtypeString = GType #const G_TYPE_STRING
 gtypePointer :: GType
 gtypePointer = GType #const G_TYPE_POINTER
 
--- | `GType` for signed integers (`gint` or `gint32`).
+-- | `GType` for signed integers (@gint@ or @gint32@).
 gtypeInt :: GType
 gtypeInt = GType #const G_TYPE_INT
 
--- | `GType` for unsigned integers (`guint` or `guint32`).
+-- | `GType` for unsigned integers (@guint@ or @guint32@).
 gtypeUInt :: GType
 gtypeUInt = GType #const G_TYPE_UINT
 
--- | `GType` for `glong`.
+-- | `GType` for @glong@.
 gtypeLong :: GType
 gtypeLong = GType #const G_TYPE_LONG
 
--- | `GType` for `gulong`.
+-- | `GType` for @gulong@.
 gtypeULong :: GType
 gtypeULong = GType #const G_TYPE_ULONG
 
@@ -104,11 +89,11 @@ gtypeDouble = GType #const G_TYPE_DOUBLE
 gtypeBoolean :: GType
 gtypeBoolean = GType #const G_TYPE_BOOLEAN
 
--- | `GType` corresponding to a `BoxedObject`.
+-- | `GType` corresponding to a boxed object.
 gtypeBoxed :: GType
 gtypeBoxed = GType #const G_TYPE_BOXED
 
--- | `GType` corresponding to a `GObject`.
+-- | `GType` corresponding to a @GObject@.
 gtypeObject :: GType
 gtypeObject = GType #const G_TYPE_OBJECT
 
@@ -117,9 +102,13 @@ gtypeObject = GType #const G_TYPE_OBJECT
 gtypeInvalid :: GType
 gtypeInvalid = GType #const G_TYPE_INVALID
 
--- | The `GType` corresponding to a `GVariant`.
+-- | The `GType` corresponding to a @GVariant@.
 gtypeVariant :: GType
 gtypeVariant = GType #const G_TYPE_VARIANT
+
+-- | The `GType` corresponding to 'Data.GI.Base.GError.GError'.
+gtypeError :: GType
+gtypeError = GType #const G_TYPE_ERROR
 
 {- Run-time types -}
 
@@ -137,6 +126,12 @@ gtypeStrv = GType g_strv_get_type
 
 foreign import ccall "g_byte_array_get_type" g_byte_array_get_type :: CGType
 
--- | `GType` for a boxed type holding a `GByteArray`.
+-- | `GType` for a boxed type holding a @GByteArray@.
 gtypeByteArray :: GType
 gtypeByteArray = GType g_byte_array_get_type
+
+foreign import ccall haskell_gi_StablePtr_get_type :: CGType
+
+-- | The `GType` for boxed `StablePtr`s.
+gtypeStablePtr :: GType
+gtypeStablePtr = GType haskell_gi_StablePtr_get_type

@@ -5,7 +5,9 @@ module Data.GI.GIR.Property
     ) where
 
 import Data.Text (Text)
+#if !MIN_VERSION_base(4,11,0)
 import Data.Monoid ((<>))
+#endif
 
 import Data.GI.GIR.Arg (parseTransfer)
 import Data.GI.GIR.BasicTypes (Transfer, Type)
@@ -39,6 +41,7 @@ parseProperty = do
   writable <- optionalAttr "writable" False parseBool
   construct <- optionalAttr "construct" False parseBool
   constructOnly <- optionalAttr "construct-only" False parseBool
+  maybeNullable <- optionalAttr "nullable" Nothing (\t -> Just <$> parseBool t)
   let flags = (if readable then [PropertyReadable] else [])
               <> (if writable then [PropertyWritable] else [])
               <> (if construct then [PropertyConstruct] else [])
@@ -51,7 +54,6 @@ parseProperty = do
                 , propTransfer = transfer
                 , propDeprecated = deprecated
                 , propDoc = doc
-                -- No support in the GIR for nullability info
-                , propReadNullable = Nothing
-                , propWriteNullable = Nothing
+                , propReadNullable = maybeNullable
+                , propWriteNullable = maybeNullable
                 }

@@ -1,6 +1,56 @@
+### 0.24.4
+
++ Add a workaround for old hsc2hs versions, so drop the constraint on hsc2hs.
+
+### 0.24.3
+
++ Require hsc2hs version 0.68.6 or higher
+
+### 0.24.2
+
++ Provide type init functions for GParamSpec types.
+
+### 0.24.1
+
++ Support for allocating `GArray`s.
+
+### 0.24.0
+
++ Support for non-GObject objects. As part of this work the GObject hierarchy has been slightly reworked. The main change is that 'gobjectType' has now become [glibType](https://hackage.haskell.org/package/haskell-gi-base-0.24.0/docs/Data-GI-Base-BasicTypes.html#v:glibType) (part of the [TypedObject](https://hackage.haskell.org/package/haskell-gi-base-0.24.0/docs/Data-GI-Base-BasicTypes.html#t:TypedObject) typeclass).
+
+### 0.22.2
+
++ Reinstate the new' method.
+
+### 0.22.1
+
++ Fix a memory allocation error in [GClosure](https://hackage.haskell.org/package/haskell-gi-base-0.22.0/docs/Data-GI-Base.html#t:GClosure) that could lead to crashes.
+
+### 0.22.0
+
++ Require base >= 0.4.9 (GHC version >= 8.0), so that we can use TypeApplications.
+
++ Make [GClosure](https://hackage.haskell.org/package/haskell-gi-base-0.22.0/docs/Data-GI-Base.html#t:GClosure) a primitive type, and make it depend on a phantom parameter to increase type safety.
+
+### 0.21.5
+
++ Add [releaseObject](https://hackage.haskell.org/package/haskell-gi-base-0.21.5/docs/Data-GI-Base-ManagedPtr.html#v:releaseObject), a function useful for manually releasing memory associated to GObjects.
+
+### 0.21.4
+
++ Add support for callback-valued properties.
+
+### 0.21.3
+
++ Fix a compilation error on Windows, see [issue 193](https://github.com/haskell-gi/haskell-gi/issues/193).
+
+### 0.21.2
+
++ Export [newManagedPtr_](https://hackage.haskell.org/package/haskell-gi-base-0.21.2/docs/Data-GI-Base-ManagedPtr.html#v:newManagedPtr_).
+
 ### 0.21.1
 
-+ Remove the `::=` and `::~` constructors in `AttrOp`, since they cannot really be used for anything, since they are pure functions.
++ Remove the `::=` and `::~` constructors in `AttrOp`, since they cannot really be used for anything, as they are pure functions.
 
 ### 0.21.0
 

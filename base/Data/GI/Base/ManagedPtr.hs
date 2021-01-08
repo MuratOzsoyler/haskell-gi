@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts, ScopedTypeVariables #-}
 -- For HasCallStack compatibility
 {-# LANGUAGE ImplicitParams, KindSignatures, ConstraintKinds #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | We wrap most objects in a "managed pointer", which is basically a
 -- 'ForeignPtr' of the appropriate type together with a notion of
@@ -14,6 +15,7 @@ module Data.GI.Base.ManagedPtr
     -- * Managed pointers
       newManagedPtr
     , newManagedPtr'
+    , newManagedPtr_
     , withManagedPtr
     , maybeWithManagedPtr
     , withManagedPtrList
@@ -26,10 +28,12 @@ module Data.GI.Base.ManagedPtr
     -- * Safe casting
     , castTo
     , unsafeCastTo
+    , checkInstanceType
 
     -- * Wrappers
     , newObject
     , wrapObject
+    , releaseObject
     , unrefObject
     , disownObject
     , newBoxed
@@ -47,10 +51,14 @@ module Data.GI.Base.ManagedPtr
 import Control.Applicative ((<$>))
 #endif
 import Control.Monad (when, void)
+import Control.Monad.Fix (mfix)
 
 import Data.Coerce (coerce)
 import Data.IORef (newIORef, readIORef, writeIORef, IORef)
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing, isJust)
+#if !MIN_VERSION_base(4,11,0)
+import Data.Monoid ((<>))
+#endif
 
 import Foreign.C (CInt(..))
 import Foreign.Ptr (Ptr, FunPtr, castPtr, nullPtr)
@@ -63,28 +71,53 @@ import Data.GI.Base.CallStack (CallStack, HasCallStack,
                                prettyCallStack, callStack)
 import Data.GI.Base.Utils
 
+import qualified Data.Text as T
+
 import System.IO (hPutStrLn, stderr)
+import System.Environment (lookupEnv)
 
 -- | Thin wrapper over `Foreign.Concurrent.newForeignPtr`.
-newManagedPtr :: Ptr a -> IO () -> IO (ManagedPtr a)
+newManagedPtr :: HasCallStack => Ptr a -> IO () -> IO (ManagedPtr a)
 newManagedPtr ptr finalizer = do
-  let ownedFinalizer :: IORef (Maybe CallStack) -> IO ()
-      ownedFinalizer callStackRef = do
-        cs <- readIORef callStackRef
-        when (isNothing cs) finalizer
   isDisownedRef <- newIORef Nothing
-  fPtr <- FC.newForeignPtr ptr (ownedFinalizer isDisownedRef)
+  dbgMode <- isJust <$> lookupEnv "HASKELL_GI_DEBUG_MEM"
+  let dbgCallStack = if dbgMode
+                     then Just callStack
+                     else Nothing
+  fPtr <- FC.newForeignPtr ptr (ownedFinalizer finalizer ptr dbgCallStack isDisownedRef)
   return $ ManagedPtr {
                managedForeignPtr = fPtr
+             , managedPtrAllocCallStack = dbgCallStack
              , managedPtrIsDisowned = isDisownedRef
              }
+
+-- | Run the finalizer for an owned pointer, assuming it has now been
+-- disowned.
+ownedFinalizer :: IO () -> Ptr a -> Maybe CallStack -> IORef (Maybe CallStack)
+               -> IO ()
+ownedFinalizer finalizer ptr allocCallStack callStackRef = do
+  cs <- readIORef callStackRef
+  -- cs will be @Just cs@ whenever the pointer has been disowned.
+  when (isNothing cs) $ case allocCallStack of
+                          Just acs -> do
+                            printAllocDebug ptr acs
+                            finalizer
+                            dbgLog (T.pack "Released successfully.\n")
+                          Nothing -> finalizer
+
+-- | Print some debug diagnostics for an allocation.
+printAllocDebug :: Ptr a -> CallStack -> IO ()
+printAllocDebug ptr allocCS =
+  (dbgLog . T.pack) ("Releasing <" <> show ptr <> ">. "
+                     <> "Callstack for allocation was:\n"
+                     <> prettyCallStack allocCS <> "\n\n")
 
 foreign import ccall "dynamic"
    mkFinalizer :: FinalizerPtr a -> Ptr a -> IO ()
 
 -- | Version of `newManagedPtr` taking a `FinalizerPtr` and a
 -- corresponding `Ptr`, as in `Foreign.ForeignPtr.newForeignPtr`.
-newManagedPtr' :: FinalizerPtr a -> Ptr a -> IO (ManagedPtr a)
+newManagedPtr' :: HasCallStack => FinalizerPtr a -> Ptr a -> IO (ManagedPtr a)
 newManagedPtr' finalizer ptr = newManagedPtr ptr (mkFinalizer finalizer ptr)
 
 -- | Thin wrapper over `Foreign.Concurrent.newForeignPtr_`.
@@ -94,17 +127,18 @@ newManagedPtr_ ptr = do
   fPtr <- newForeignPtr_ ptr
   return $ ManagedPtr {
                managedForeignPtr = fPtr
+             , managedPtrAllocCallStack = Nothing
              , managedPtrIsDisowned = isDisownedRef
              }
 
 -- | Do not run the finalizers upon garbage collection of the
 -- `ManagedPtr`.
-disownManagedPtr :: forall a. (HasCallStack, ManagedPtrNewtype a) => a -> IO (Ptr a)
+disownManagedPtr :: forall a b. (HasCallStack, ManagedPtrNewtype a) => a -> IO (Ptr b)
 disownManagedPtr managed = do
   ptr <- unsafeManagedPtrGetPtr managed
   writeIORef (managedPtrIsDisowned c) (Just callStack)
-  return ptr
-    where c = coerce managed :: ManagedPtr ()
+  return (castPtr ptr)
+    where c = toManagedPtr managed
 
 -- | Perform an IO action on the 'Ptr' inside a managed pointer.
 withManagedPtr :: (HasCallStack, ManagedPtrNewtype a) => a -> (Ptr a -> IO c) -> IO c
@@ -154,7 +188,7 @@ unsafeManagedPtrGetPtr = unsafeManagedPtrCastPtr
 unsafeManagedPtrCastPtr :: forall a b. (HasCallStack, ManagedPtrNewtype a) =>
                            a -> IO (Ptr b)
 unsafeManagedPtrCastPtr m = do
-    let c = coerce m :: ManagedPtr ()
+    let c = toManagedPtr m
         ptr = (castPtr . unsafeForeignPtrToPtr . managedForeignPtr) c
     disowned <- readIORef (managedPtrIsDisowned c)
     maybe (return ptr) (notOwnedWarning ptr) disowned
@@ -174,40 +208,53 @@ notOwnedWarning ptr cs = do
 -- (i.e. it has not been garbage collected by the runtime) at the
 -- point that this is called.
 touchManagedPtr :: forall a. ManagedPtrNewtype a => a -> IO ()
-touchManagedPtr m = let c = coerce m :: ManagedPtr ()
+touchManagedPtr m = let c = toManagedPtr m
                     in (touchForeignPtr . managedForeignPtr) c
 
 -- Safe casting machinery
 foreign import ccall unsafe "check_object_type"
-    c_check_object_type :: Ptr o -> CGType -> CInt
+    c_check_object_type :: Ptr o -> CGType -> IO CInt
 
--- | Cast to the given type, checking that the cast is valid. If it is
--- not, we return `Nothing`. Usage:
+-- | Check whether the given object is an instance of the given type.
+checkInstanceType :: (ManagedPtrNewtype o, TypedObject o) =>
+                     o -> GType -> IO Bool
+checkInstanceType obj (GType cgtype) = withManagedPtr obj $ \objPtr -> do
+  check <- c_check_object_type objPtr cgtype
+  return $ check /= 0
+
+-- | Cast from one object type to another, checking that the cast is
+-- valid. If it is not, we return `Nothing`. Usage:
 --
 -- > maybeWidget <- castTo Widget label
-castTo :: forall o o'. (GObject o, GObject o') =>
+castTo :: forall o o'. (HasCallStack,
+                        ManagedPtrNewtype o, TypedObject o,
+                        ManagedPtrNewtype o', TypedObject o',
+                        GObject o') =>
           (ManagedPtr o' -> o') -> o -> IO (Maybe o')
-castTo constructor obj =
-    withManagedPtr obj $ \objPtr -> do
-      GType t <- gobjectType (undefined :: o')
-      if c_check_object_type objPtr t /= 1
-        then return Nothing
-        else Just <$> newObject constructor objPtr
+castTo constructor obj = do
+  gtype <- glibType @o'
+  isInstance <- checkInstanceType obj gtype
+  if isInstance
+    then return . Just . constructor . coerce $ toManagedPtr obj
+    else return Nothing
 
--- | Cast to the given type, assuming that the cast will succeed. This
--- function will call `error` if the cast is illegal.
-unsafeCastTo :: forall o o'. (HasCallStack, GObject o, GObject o') =>
+-- | Cast a typed object to a new type (without any assumption that
+-- both types descend from `GObject`), assuming that the cast will
+-- succeed. This function will call `error` if the cast is illegal.
+unsafeCastTo :: forall o o'. (HasCallStack,
+                              ManagedPtrNewtype o, TypedObject o,
+                              ManagedPtrNewtype o', TypedObject o') =>
                 (ManagedPtr o' -> o') -> o -> IO o'
-unsafeCastTo constructor obj =
-  withManagedPtr obj $ \objPtr -> do
-    GType t <- gobjectType (undefined :: o')
-    if c_check_object_type objPtr t /= 1
+unsafeCastTo constructor obj = do
+    gtype <- glibType @o'
+    isInstance <- checkInstanceType obj gtype
+    if not isInstance
       then do
-      srcType <- gobjectType obj >>= gtypeName
-      destType <- gobjectType (undefined :: o') >>= gtypeName
+      srcType <- glibType @o >>= gtypeName
+      destType <- glibType @o' >>= gtypeName
       error $ "unsafeCastTo :: invalid conversion from " ++ srcType ++ " to "
         ++ destType ++ " requested."
-      else newObject constructor objPtr
+      else return (constructor $ coerce $ toManagedPtr obj)
 
 -- Reference counting for constructors
 foreign import ccall "&dbg_g_object_unref"
@@ -248,6 +295,17 @@ wrapObject constructor ptr = do
   fPtr <- newManagedPtr' ptr_to_g_object_unref $ castPtr ptr
   return $! constructor fPtr
 
+-- | Unref the given `GObject` and disown it. Use this if you want to
+-- manually release the memory associated to a given `GObject`
+-- (assuming that no other reference to the underlying C object exists)
+-- before the garbage collector does it. It is typically not safe to
+-- access the `GObject` after calling this function.
+releaseObject :: (HasCallStack, GObject a) => a -> IO ()
+releaseObject obj = do
+  ptr <- disownObject obj
+  dbgDealloc obj
+  dbg_g_object_unref ptr
+
 -- It is fine to use unsafe here, since all this does is schedule an
 -- idle callback. The scheduling itself will never block for a long
 -- time, or call back into Haskell.
@@ -257,8 +315,10 @@ foreign import ccall unsafe "dbg_g_object_unref"
 -- | Decrease the reference count of the given 'GObject'. The memory
 -- associated with the object may be released if the reference count
 -- reaches 0.
-unrefObject :: GObject a => a -> IO ()
-unrefObject obj = withManagedPtr obj dbg_g_object_unref
+unrefObject :: (HasCallStack, GObject a) => a -> IO ()
+unrefObject obj = withManagedPtr obj $ \ptr -> do
+  dbgDealloc obj
+  dbg_g_object_unref ptr
 
 -- | Print some debug info (if the right environment valiable is set)
 -- about the object being disowned.
@@ -268,10 +328,11 @@ foreign import ccall "dbg_g_object_disown"
 -- | Disown a GObject, that is, do not unref the associated foreign
 -- GObject when the Haskell object gets garbage collected. Returns the
 -- pointer to the underlying GObject.
-disownObject :: GObject a => a -> IO (Ptr b)
+disownObject :: (HasCallStack, GObject a) => a -> IO (Ptr b)
 disownObject obj = withManagedPtr obj $ \ptr -> do
-                     dbg_g_object_disown ptr
-                     castPtr <$> disownManagedPtr obj
+  dbgDealloc obj
+  dbg_g_object_disown ptr
+  castPtr <$> disownManagedPtr obj
 
 -- It is fine to use unsafe here, since all this does is schedule an
 -- idle callback. The scheduling itself will never block for a long
@@ -284,32 +345,32 @@ foreign import ccall "g_boxed_copy" g_boxed_copy ::
 
 -- | Construct a Haskell wrapper for the given boxed object. We make a
 -- copy of the object.
-newBoxed :: forall a. BoxedObject a => (ManagedPtr a -> a) -> Ptr a -> IO a
+newBoxed :: forall a. (HasCallStack, GBoxed a) => (ManagedPtr a -> a) -> Ptr a -> IO a
 newBoxed constructor ptr = do
-  GType gtype <- boxedType (undefined :: a)
+  GType gtype <- glibType @a
   ptr' <- g_boxed_copy gtype ptr
   fPtr <- newManagedPtr ptr' (boxed_free_helper gtype ptr')
   return $! constructor fPtr
 
 -- | Like 'newBoxed', but we do not make a copy (we "steal" the passed
 -- object, so now it is managed by the Haskell runtime).
-wrapBoxed :: forall a. BoxedObject a => (ManagedPtr a -> a) -> Ptr a -> IO a
+wrapBoxed :: forall a. (HasCallStack, GBoxed a) => (ManagedPtr a -> a) -> Ptr a -> IO a
 wrapBoxed constructor ptr = do
-  GType gtype <- boxedType (undefined :: a)
+  GType gtype <- glibType @a
   fPtr <- newManagedPtr ptr (boxed_free_helper gtype ptr)
   return $! constructor fPtr
 
 -- | Make a copy of the given boxed object.
-copyBoxed :: forall a. BoxedObject a => a -> IO (Ptr a)
+copyBoxed :: forall a. (HasCallStack, GBoxed a) => a -> IO (Ptr a)
 copyBoxed b = do
-  GType gtype <- boxedType b
+  GType gtype <- glibType @a
   withManagedPtr b (g_boxed_copy gtype)
 
 -- | Like 'copyBoxed', but acting directly on a pointer, instead of a
 -- managed pointer.
-copyBoxedPtr :: forall a. BoxedObject a => Ptr a -> IO (Ptr a)
+copyBoxedPtr :: forall a. GBoxed a => Ptr a -> IO (Ptr a)
 copyBoxedPtr ptr = do
-  GType gtype <- boxedType (undefined :: a)
+  GType gtype <- glibType @a
   g_boxed_copy gtype ptr
 
 foreign import ccall "g_boxed_free" g_boxed_free ::
@@ -317,37 +378,58 @@ foreign import ccall "g_boxed_free" g_boxed_free ::
 
 -- | Free the memory associated with a boxed object. Note that this
 -- disowns the associated `ManagedPtr` via `disownManagedPtr`.
-freeBoxed :: forall a. (HasCallStack, BoxedObject a) => a -> IO ()
+freeBoxed :: forall a. (HasCallStack, GBoxed a) => a -> IO ()
 freeBoxed boxed = do
-  GType gtype <- boxedType (undefined :: a)
+  GType gtype <- glibType @a
   ptr <- disownManagedPtr boxed
+  dbgDealloc boxed
   g_boxed_free gtype ptr
 
 -- | Disown a boxed object, that is, do not free the associated
 -- foreign GBoxed when the Haskell object gets garbage
--- collected. Returns the pointer to the underlying `BoxedObject`.
-disownBoxed :: (HasCallStack, BoxedObject a) => a -> IO (Ptr a)
+-- collected. Returns the pointer to the underlying `GBoxed`.
+disownBoxed :: (HasCallStack, GBoxed a) => a -> IO (Ptr a)
 disownBoxed = disownManagedPtr
 
 -- | Wrap a pointer, taking ownership of it.
-wrapPtr :: WrappedPtr a => (ManagedPtr a -> a) -> Ptr a -> IO a
-wrapPtr constructor ptr = do
-  fPtr <- case wrappedPtrFree of
-            Nothing -> newManagedPtr_ ptr
-            Just finalizer -> newManagedPtr' finalizer ptr
+wrapPtr :: (HasCallStack, BoxedPtr a) => (ManagedPtr a -> a) -> Ptr a -> IO a
+wrapPtr constructor ptr = mfix $ \wrapped -> do
+  fPtr <- newManagedPtr ptr (boxedPtrFree wrapped)
   return $! constructor fPtr
 
 -- | Wrap a pointer, making a copy of the data.
-newPtr :: WrappedPtr a => (ManagedPtr a -> a) -> Ptr a -> IO a
+newPtr :: (HasCallStack, BoxedPtr a) => (ManagedPtr a -> a) -> Ptr a -> IO a
 newPtr constructor ptr = do
   tmpWrap <- newManagedPtr_ ptr
-  ptr' <- wrappedPtrCopy (constructor tmpWrap)
+  ptr' <- boxedPtrCopy (constructor tmpWrap)
   return $! ptr'
 
 -- | Make a copy of a wrapped pointer using @memcpy@ into a freshly
 -- allocated memory region of the given size.
-copyBytes :: WrappedPtr a => Int -> Ptr a -> IO (Ptr a)
+copyBytes :: (HasCallStack, CallocPtr a) => Int -> Ptr a -> IO (Ptr a)
 copyBytes size ptr = do
-  ptr' <- wrappedPtrCalloc
+  ptr' <- boxedPtrCalloc
   memcpy ptr' ptr size
   return ptr'
+
+foreign import ccall unsafe "g_thread_self" g_thread_self :: IO (Ptr ())
+
+-- | Same as `dbgDeallocPtr`, but for `ManagedPtr`s, and no callstack
+-- needs to be provided.
+dbgDealloc :: (HasCallStack, ManagedPtrNewtype a) => a -> IO ()
+dbgDealloc m = do
+  env <- lookupEnv "HASKELL_GI_DEBUG_MEM"
+  case env of
+    Nothing -> return ()
+    Just _ -> do
+      let mPtr = toManagedPtr m
+          ptr = (unsafeForeignPtrToPtr . managedForeignPtr) mPtr
+      threadPtr <- g_thread_self
+      hPutStrLn stderr ("Releasing <" ++ show ptr ++ "> from thread ["
+                         ++ show threadPtr ++ "].\n"
+                         ++ (case managedPtrAllocCallStack mPtr of
+                               Just allocCS -> "• Callstack for allocation:\n"
+                                               ++ prettyCallStack allocCS ++ "\n\n"
+                               Nothing -> "")
+                         ++ "• CallStack for deallocation:\n"
+                         ++ prettyCallStack callStack ++ "\n")

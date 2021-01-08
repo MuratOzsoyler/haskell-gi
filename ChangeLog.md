@@ -1,3 +1,85 @@
+### 0.24.5
+
++ Fix an accidental double free for GValues, see [issue 320](https://github.com/haskell-gi/haskell-gi/issues/320).
+
++ Accept docsections in gir files, although they are currently ignored. See [issue 318](https://github.com/haskell-gi/haskell-gi/issues/318).
+
+### 0.24.4
+
++ Relax bound on ansi-terminal.
+
+### 0.24.3
+
++ Provide type init functions for GParamSpec types. This solves a puzzling linker error saying that the "intern" symbol could not be resolved, see [issue 297](https://github.com/haskell-gi/haskell-gi/issues/297) and [issue 298](https://github.com/haskell-gi/haskell-gi/issues/298).
+
+### 0.24.2
+
++ Support for allocating GArrays of known size structs in caller-allocates arguments.
+
+### 0.24.1
+
++ Add support for delete-attr override, to remove attributes.
+
++ Allow (but ignore) destroyers in scope async callbacks.
+
+### 0.24.0
+
++ Added support for non-GObject objects
+
+### 0.23.2
+
++ Fix a possible segfault in functions that return an out pointer to a dynamically allocated array, but do not initialize the array if it has zero size. See [#289](https://github.com/haskell-gi/haskell-gi/issues/289) for an example.
+
+### 0.23.1
+
++ Check whether symbols exist in the dynamic library before trying to generate bindings for them, in order to avoid linker errors.
+
+### 0.23.0
+
++ gobjectType now does not require a proxy argument, it needs to be used with TypeApplications instead.
+
++ Annotated signals are supported: `on widget (signal ::: "detail")`.
+
++ Safe coercions to parent types supported, with `asA`.
+
++ Support for GObject subclassing, and registering custom properties.
+
++ Use TypeApplications in `AttrInfo` implementation, and inherited methods implementation.
+
++ Add an allocating setting operator `(:&=)`.
+
++ Support for exporting class structs.
+
++ IsGValue instances for GObjects and boxed objects.
+
+### 0.22.6
+
++ Fix generated IsX typeclasses for non-GObject interfaces.
+
+### 0.22.5
+
++ Add support for inheriting overloading info.
+
+### 0.22.4
+
++ Do not generate bindings for struct/union fields pointing to private/class structs, which we do not bind.
+
+### 0.22.3
+
++ Sometimes struct fields marked as not introspectable contain invalid introspection info. We are lenient in these cases with parsing errors, and simply ignore the fields.
+
+### 0.21.5
+
++ Add support for callback-valued properties.
+
+### 0.21.4
+
++ Try to guess signedness of enums and flags on the C side, fixes [#184](https://github.com/haskell-gi/haskell-gi/issues/184).
+
+### 0.21.3
+
++ Do not add nodes in overrides if a node with the same name already exists, fixes [#171](https://github.com/haskell-gi/haskell-gi/issues/171).
+
 ### 0.21.2
 
 + Do not free `Ptr Word8` types after performing the call to C,

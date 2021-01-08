@@ -21,6 +21,16 @@ sudo apt-get install libgirepository1.0-dev libwebkit2gtk-4.0-dev libgtksourcevi
 sudo pacman -S gobject-introspection gobject-introspection-runtime gtksourceview3 webkit2gtk
 ```
 
+### Mac OSX
+
+Install [Homebrew](https://brew.sh/) and install GTK+ and GObject Introspection:
+
+```
+brew install gobject-introspection gtk+ gtk+3
+```
+Ensure the path to libffi (probably `/usr/local/opt/libffi/lib/pkgconfig`) is in the PKG_CONFIG_PATH environment variable.
+
+
 ### Windows
 
 Please see [here](https://github.com/haskell-gi/haskell-gi/wiki/Using-haskell-gi-in-Windows) for detailed installation instructions in Windows.
@@ -31,23 +41,20 @@ Unfortunately there is [a bug](https://ghc.haskell.org/trac/ghc/ticket/14382) in
 
 ## Using the generated bindings
 
-The most recent versions of the generated bindings are available from hackage. To install, start by making sure that you have a recent (1.24 or later) version of `cabal-install`:
+The most recent versions of the generated bindings are available from hackage. To install, start by making sure that you have a recent (2.0 or later) version of `cabal-install`, for instance:
 ```sh
 $ cabal install cabal-install
 $ cabal --version
-cabal-install version 1.24.0.0
-compiled using version 1.24.0.0 of the Cabal library 
+cabal-install version 2.4.1.0
+compiled using version 2.4.1.0 of the Cabal library
 ```
 
-Then install the bindings you need. For instance, for the gtk+ bindings you can do:
-```sh
-$ cabal install gi-gtk
-```
-(Note: you may need to run this command twice, due to [a bug in cabal](https://github.com/haskell/cabal/issues/3436)).
-
-That's it! Here is an example "Hello World" program:
+Here is an example "Hello World" program:
 ```haskell
 {-# LANGUAGE OverloadedStrings, OverloadedLabels #-}
+{- cabal:
+build-depends: base, haskell-gi-base, gi-gtk == 3.0.*
+-}
 
 import qualified GI.Gtk as Gtk
 import Data.GI.Base
@@ -72,11 +79,8 @@ main = do
   Gtk.main
 ```
 This program uses the new `OverloadedLabels` extension in GHC 8.0, so make sure you have a recent enough version of GHC installed. To run this program, copy it to a file (`hello.hs`, say), and then
-```
-$ cabal sandbox init
-$ cabal install gi-gtk
-$ cabal exec -- ghc hello.hs
-$ ./hello
+```sh
+$ cabal v2-run hello.hs
 ```
 For a more involved example, see for instance [this WebKit example](https://github.com/haskell-gi/haskell-gi/tree/master/examples). Further documentation can be found in [the Wiki](https://github.com/haskell-gi/haskell-gi/wiki).
 
@@ -117,4 +121,17 @@ Hopefully this helps to get started! For any further questions there is a gitter
 
 It should be rather easy to generate bindings to any library with `gobject-introspection` support, see the examples in the [bindings](https://github.com/haskell-gi/haskell-gi/tree/master/bindings) folder. Pull requests appreciated!
 
-[![Build Status](https://travis-ci.org/haskell-gi/haskell-gi.svg?branch=master)](https://travis-ci.org/haskell-gi/haskell-gi) [![Join the chat at https://gitter.im/haskell-gi/haskell-gi](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/haskell-gi/haskell-gi?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+## Higher-Level Bindings
+
+The bindings in `haskell-gi` aim for complete coverage of the bound APIs, but as a result they are imperative in flavour. For nicer, higher-level approaches based on these bindings, see:
+
+* [gi-gtk-declarative](https://github.com/owickstrom/gi-gtk-declarative)
+* [reactive-banana-gi-gtk](https://github.com/mr/reactive-banana-gi-gtk)
+
+## Other Resources
+
+* [Haskell at Work screencast: GTK+ Programming with Haskell](https://haskell-at-work.com/episodes/2018-11-13-gtk-programming-with-haskell.html)
+
+---
+
+[![Join the chat at https://gitter.im/haskell-gi/haskell-gi](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/haskell-gi/haskell-gi?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge) ![Linux CI](https://github.com/haskell-gi/haskell-gi/workflows/Linux%20CI/badge.svg)

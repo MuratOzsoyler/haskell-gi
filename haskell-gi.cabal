@@ -1,5 +1,5 @@
 name:                haskell-gi
-version:             0.21.2
+version:             0.24.7
 synopsis:            Generate Haskell bindings for GObject Introspection capable libraries
 description:         Generate Haskell bindings for GObject Introspection capable libraries. This includes most notably
                      Gtk+, but many other libraries in the GObject ecosystem provide introspection data too.
@@ -10,47 +10,55 @@ license-file:        LICENSE
 author:              Will Thompson,
                      Iñaki García Etxebarria,
                      Jonas Platte
-maintainer:          Iñaki García Etxebarria (garetxe@gmail.com)
+maintainer:          Iñaki García Etxebarria (inaki@blueleaf.cc)
 stability:           Experimental
 category:            Development
-build-type:          Simple
-tested-with:         GHC == 7.8.4, GHC == 7.10.3, GHC == 8.0.1, GHC == 8.4.1
-cabal-version:       >=1.8
+build-type:          Custom
+tested-with:         GHC == 8.8.1, GHC == 8.10.1
+cabal-version:       2.0
 
 extra-source-files: ChangeLog.md
+
+custom-setup
+ setup-depends:
+   base >= 4 && <5,
+   Cabal,
+   cabal-doctest >= 1 && <1.1
 
 source-repository head
   type: git
   location: git://github.com/haskell-gi/haskell-gi.git
 
 Library
+  default-language:    Haskell2010
   pkgconfig-depends:   gobject-introspection-1.0 >= 1.32, gobject-2.0 >= 2.32
-  build-depends:       base >= 4.7 && < 5,
-                       haskell-gi-base == 0.21.*,
+  build-depends:       base >= 4.9 && < 5,
+                       haskell-gi-base >= 0.24.5 && <0.25,
                        Cabal >= 1.24,
-                       attoparsec == 0.13.*,
+                       attoparsec >= 0.13,
                        containers,
                        directory,
                        filepath,
                        mtl >= 2.2,
                        transformers >= 0.3,
                        pretty-show,
+                       ansi-terminal >= 0.10,
                        process,
                        safe,
                        bytestring,
                        xdg-basedir,
-                       xml-conduit >= 1.3.0,
+                       xml-conduit >= 1.3,
                        regex-tdfa >= 1.2,
                        text >= 1.0
 
-  if !impl(ghc >= 8.0)
-    build-depends: semigroups == 0.18.*
+  default-extensions: CPP, ForeignFunctionInterface, DoAndIfThenElse, LambdaCase, RankNTypes, OverloadedStrings
+  ghc-options:         -Wall -fwarn-incomplete-patterns -fno-warn-name-shadowing
 
-  extensions:          CPP, ForeignFunctionInterface, DoAndIfThenElse, LambdaCase, RankNTypes, OverloadedStrings
-  ghc-options:         -Wall -fno-warn-missing-signatures -fwarn-incomplete-patterns -fno-warn-name-shadowing
+  ghc-options: -Wcompat
+
   c-sources:           lib/c/enumStorage.c
+  build-tool-depends:  hsc2hs:hsc2hs
 
-  build-tools:         hsc2hs
   hs-source-dirs:      lib
   exposed-modules:     Data.GI.GIR.Alias,
                        Data.GI.GIR.Allocation,
@@ -111,24 +119,14 @@ Library
 
   other-modules:       Paths_haskell_gi
 
+  autogen-modules:     Paths_haskell_gi
+
 test-suite doctests
   type:          exitcode-stdio-1.0
-  ghc-options:   -threaded
+  default-language: Haskell2010
+  ghc-options:   -threaded -Wall
   main-is:       DocTests.hs
-  build-depends: base, doctest >= 0.8
-
-executable haskell-gi
-  main-is:             haskell-gi.hs
-  hs-source-dirs:      cmdline
-
-  extensions:          CPP, OverloadedStrings, LambdaCase
-  ghc-options:         -Wall -fno-warn-name-shadowing
-
-  build-depends:       base >= 4.7 && < 5,
-                       text >= 1.0,
-                       filepath,
-                       containers,
-                       directory,
-                       pretty-show,
-                       haskell-gi,
-                       haskell-gi-base
+  build-depends: base
+               , process
+               , doctest >= 0.8
+               , haskell-gi

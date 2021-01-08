@@ -2,11 +2,9 @@ module Data.GI.CodeGen.Constant
     ( genConstant
     ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<$>))
-#endif
-
+#if !MIN_VERSION_base(4,11,0)
 import Data.Monoid ((<>))
+#endif
 import Data.Text (Text)
 
 import Data.GI.CodeGen.API
@@ -15,7 +13,7 @@ import Data.GI.CodeGen.Conversions
 import Data.GI.CodeGen.Haddock (deprecatedPragma, writeDocumentation,
                                 RelativeDocPosition(..))
 import Data.GI.CodeGen.Type
-import Data.GI.CodeGen.Util (tshow)
+import Data.GI.CodeGen.Util (tshow, ucFirst)
 
 -- | Data for a bidrectional pattern synonym. It is either a simple
 -- one of the form "pattern Name = value :: Type" or an explicit one
@@ -33,24 +31,27 @@ type PSExpression = Text
 
 writePattern :: Text -> PatternSynonym -> CodeGen ()
 writePattern name (SimpleSynonym value t) = line $
-      "pattern " <> name <> " = " <> value <> " :: " <> t
+      "pattern " <> ucFirst name <> " = " <> value <> " :: " <> t
 writePattern name (ExplicitSynonym view expression value t) = do
   -- Supported only on ghc >= 7.10
   setModuleMinBase Base48
-  line $ "pattern " <> name <> " <- (" <> view <> " -> "
+  line $ "pattern " <> ucFirst name <> " <- (" <> view <> " -> "
            <> value <> ") :: " <> t <> " where"
   indent $ line $
-          name <> " = " <> expression <> " " <> value <> " :: " <> t
+          ucFirst name <> " = " <> expression <> " " <> value <> " :: " <> t
 
 genConstant :: Name -> Constant -> CodeGen ()
 genConstant (Name _ name) c = group $ do
   setLanguagePragmas ["PatternSynonyms", "ScopedTypeVariables", "ViewPatterns"]
   deprecatedPragma name (constantDeprecated c)
 
-  handleCGExc (\e -> line $ "-- XXX: Could not generate constant: " <> describeCGError e)
+  handleCGExc (\e -> do
+                  line $ "-- XXX: Could not generate constant"
+                  printCGError e
+              )
     (do writeDocumentation DocBeforeSymbol (constantDocumentation c)
         assignValue name (constantType c) (constantValue c)
-        export ToplevelSection ("pattern " <> name))
+        export ToplevelSection ("pattern " <> ucFirst name))
 
 -- | Assign to the given name the given constant value, in a way that
 -- can be assigned to the corresponding Haskell type.
@@ -92,10 +93,10 @@ showBasicType TInt32   i       = return i
 showBasicType TUInt32  i       = return i
 showBasicType TInt64   i       = return i
 showBasicType TUInt64  i       = return i
-showBasicType TBoolean "0"     = return "False"
-showBasicType TBoolean "false" = return "False"
-showBasicType TBoolean "1"     = return "True"
-showBasicType TBoolean "true"  = return "True"
+showBasicType TBoolean "0"     = return "P.False"
+showBasicType TBoolean "false" = return "P.False"
+showBasicType TBoolean "1"     = return "P.True"
+showBasicType TBoolean "true"  = return "P.True"
 showBasicType TBoolean b       = notImplementedError $ "Could not parse boolean \"" <> b <> "\""
 showBasicType TFloat   f       = return f
 showBasicType TDouble  d       = return d

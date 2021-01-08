@@ -115,11 +115,11 @@ wordToGFlags w = go 0
 foreign import ccall "g_list_prepend" g_list_prepend ::
     Ptr (GList (Ptr a)) -> Ptr a -> IO (Ptr (GList (Ptr a)))
 
--- Given a Haskell list of items, construct a GList with those values.
+-- | Given a Haskell list of items, construct a GList with those values.
 packGList   :: [Ptr a] -> IO (Ptr (GList (Ptr a)))
 packGList l = foldM g_list_prepend nullPtr $ reverse l
 
--- Given a GSList construct the corresponding Haskell list.
+-- | Given a GSList construct the corresponding Haskell list.
 unpackGList   :: Ptr (GList (Ptr a)) -> IO [Ptr a]
 unpackGList gsl
     | gsl == nullPtr = return []
@@ -134,11 +134,11 @@ unpackGList gsl
 foreign import ccall "g_slist_prepend" g_slist_prepend ::
     Ptr (GSList (Ptr a)) -> Ptr a -> IO (Ptr (GSList (Ptr a)))
 
--- Given a Haskell list of items, construct a GSList with those values.
+-- | Given a Haskell list of items, construct a GSList with those values.
 packGSList   :: [Ptr a] -> IO (Ptr (GSList (Ptr a)))
 packGSList l = foldM g_slist_prepend nullPtr $ reverse l
 
--- Given a GSList construct the corresponding Haskell list.
+-- | Given a GSList construct the corresponding Haskell list.
 unpackGSList   :: Ptr (GSList (Ptr a)) -> IO [Ptr a]
 unpackGSList gsl = unpackGList (castPtr gsl)
 
@@ -201,7 +201,7 @@ unpackGPtrArray array = do
   dataPtr <- peek (castPtr array :: Ptr (Ptr (Ptr a)))
   nitems <- peek (array `plusPtr` sizeOf dataPtr)
   go dataPtr nitems
-    where go :: Ptr (Ptr a) -> Int -> IO [Ptr a]
+    where go :: Ptr (Ptr a) -> CUInt -> IO [Ptr a]
           go _ 0 = return []
           go ptr n = do
             x <- peek ptr
@@ -558,7 +558,7 @@ unpackBlockArrayWithLength size n ptr = go size (fromIntegral n) ptr
             buf <- g_memdup ptr (fromIntegral size)
             (buf :) <$> go size (n-1) (ptr `plusPtr` size)
 
-unpackBoxedArrayWithLength :: forall a b. (Integral a, BoxedObject b) =>
+unpackBoxedArrayWithLength :: forall a b. (Integral a, GBoxed b) =>
                               Int -> a -> Ptr b -> IO [Ptr b]
 unpackBoxedArrayWithLength size n ptr = go size (fromIntegral n) ptr
     where go       :: Int -> Int -> Ptr b -> IO [Ptr b]

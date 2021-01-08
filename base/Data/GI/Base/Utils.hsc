@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables, TupleSections, OverloadedStrings,
-    FlexibleContexts, ConstraintKinds #-}
+    FlexibleContexts, ConstraintKinds, TypeApplications #-}
 {- | Assorted utility functions for bindings. -}
 module Data.GI.Base.Utils
     ( whenJust
@@ -21,29 +21,34 @@ module Data.GI.Base.Utils
     , memcpy
     , safeFreeFunPtr
     , safeFreeFunPtrPtr
+    , safeFreeFunPtrPtr'
     , maybeReleaseFunPtr
     , checkUnexpectedReturnNULL
     , checkUnexpectedNothing
+    , dbgLog
     ) where
 
 #include <glib-object.h>
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative (Applicative, pure, (<$>), (<*>))
-#endif
 import Control.Exception (throwIO)
 import Control.Monad (void)
 
 import qualified Data.Text as T
+import qualified Data.Text.Foreign as TF
+#if !MIN_VERSION_base(4,11,0)
 import Data.Monoid ((<>))
+#endif
 import Data.Word
 
+#if !MIN_VERSION_base(4,13,0)
 import Foreign (peek)
-import Foreign.C.Types (CSize(..))
+#endif
+import Foreign.C.Types (CSize(..), CChar)
 import Foreign.Ptr (Ptr, nullPtr, FunPtr, nullFunPtr, freeHaskellFunPtr)
 import Foreign.Storable (Storable(..))
 
-import Data.GI.Base.BasicTypes (GType(..), CGType, BoxedObject(..),
+import Data.GI.Base.BasicTypes (GType(..), CGType, GBoxed,
+                                TypedObject(glibType),
                                 UnexpectedNullPointerReturn(..))
 import Data.GI.Base.CallStack (HasCallStack, callStack, prettyCallStack)
 
@@ -124,10 +129,10 @@ foreign import ccall "g_boxed_copy" g_boxed_copy ::
 -- in particular may well be different from a plain g_malloc. In
 -- particular g_slice_alloc is often used for allocating boxed
 -- objects, which are then freed using g_slice_free.
-callocBoxedBytes :: forall a. BoxedObject a => Int -> IO (Ptr a)
+callocBoxedBytes :: forall a. GBoxed a => Int -> IO (Ptr a)
 callocBoxedBytes n = do
   ptr <- callocBytes n
-  GType cgtype <- boxedType (undefined :: a)
+  GType cgtype <- glibType @a
   result <- g_boxed_copy cgtype ptr
   freeMem ptr
   return result
@@ -168,6 +173,12 @@ foreign import ccall "safeFreeFunPtr" safeFreeFunPtr ::
 foreign import ccall "& safeFreeFunPtr" safeFreeFunPtrPtr ::
     FunPtr (Ptr a -> IO ())
 
+-- | Similar to 'safeFreeFunPtrPtr', but accepts an additional
+-- (ignored) argument. The first argument is interpreted as a
+-- 'FunPtr', and released.
+foreign import ccall "& safeFreeFunPtr2" safeFreeFunPtrPtr' ::
+    FunPtr (Ptr a -> Ptr b -> IO ())
+
 -- | If given a pointer to the memory location, free the `FunPtr` at
 -- that location, and then the pointer itself. Useful for freeing the
 -- memory associated to callbacks which are called just once, with no
@@ -186,7 +197,8 @@ checkUnexpectedReturnNULL fnName ptr
         throwIO (UnexpectedNullPointerReturn {
                    nullPtrErrorMsg = "Received unexpected nullPtr in \""
                                      <> fnName <> "\".\n" <>
-                                     "This is a bug in the introspection data, please report it at\nhttps://github.com/haskell-gi/haskell-gi/issues\n" <>
+                                     "This might be a bug in the introspection data, or perhaps a use-after-free bug.\n" <>
+                                     "If in doubt, please report it at\n\thttps://github.com/haskell-gi/haskell-gi/issues\n" <>
                                      T.pack (prettyCallStack callStack)
                  })
     | otherwise = return ()
@@ -199,8 +211,17 @@ checkUnexpectedNothing fnName action = do
   case result of
     Just r -> return r
     Nothing -> throwIO (UnexpectedNullPointerReturn {
-                 nullPtrErrorMsg = "Received unexpected nullPtr in \""
+                 nullPtrErrorMsg = "Received unexpected Nothing in \""
                                      <> fnName <> "\".\n" <>
-                                     "This is a bug in the introspection data, please report it at\nhttps://github.com/haskell-gi/haskell-gi/issues\n" <>
+                                     "This might be a bug in the introspection data, or perhaps a use-after-free bug.\n" <>
+                                     "If in doubt, please report it at\n\thttps://github.com/haskell-gi/haskell-gi/issues\n" <>
                                      T.pack (prettyCallStack callStack)
                  })
+
+foreign import ccall unsafe "dbg_log_with_len" dbg_log_with_len ::
+        Ptr CChar -> Int -> IO ()
+
+-- | Print a string to the debug log in an atomic way (so the output
+-- of different threads does not get intermingled).
+dbgLog :: T.Text -> IO ()
+dbgLog msg = TF.withCStringLen msg $ \(ptr, len) -> dbg_log_with_len ptr len

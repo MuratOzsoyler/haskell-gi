@@ -5,11 +5,11 @@ module Main where
 import           Data.Maybe (fromJust)
 import           Data.Text (Text)
 -- External resource bundles Step 2: Reactivate next 2 lines
+-- import qualified GI.Gio as Gio
 -- import           System.Environment 
 -- import           System.FilePath 
 
 import           Data.GI.Base
-import qualified GI.Gio as Gio 
 import qualified GI.Gtk as Gtk
 
 unsafeGetObjectWithCast :: GObject o => Gtk.Builder -> Text -> (ManagedPtr o -> o) -> IO o
@@ -46,9 +46,7 @@ appActivate app = do
 
 main :: IO ()
 main = do
-  app <- new Gtk.Application [ #applicationId := "haskell-gi.examples.resource-bundle"
-                             , #flags := [Gio.ApplicationFlagsFlagsNone]
-                             ]
+  app <- new Gtk.Application [#applicationId := "haskell-gi.examples.resource-bundle"]
   on app #activate $ appActivate app
 
   #run app Nothing

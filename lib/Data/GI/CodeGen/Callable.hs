@@ -3,7 +3,6 @@ module Data.GI.CodeGen.Callable
     ( genCCallableWrapper
     , genDynamicCallableWrapper
     , ForeignSymbol(..)
-    , ExposeClosures(..)
 
     , hOutType
     , skipRetVal
@@ -20,14 +19,13 @@ module Data.GI.CodeGen.Callable
     , inArgInterfaces
     ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<$>))
-#endif
 import Control.Monad (forM, forM_, when, void)
 import Data.Bool (bool)
-import Data.List (nub, (\\))
+import Data.List (nub)
 import Data.Maybe (isJust)
+#if !MIN_VERSION_base(4,13,0)
 import Data.Monoid ((<>))
+#endif
 import Data.Tuple (swap)
 import qualified Data.Map as Map
 import qualified Data.Text as T
@@ -45,11 +43,6 @@ import Data.GI.CodeGen.Type
 import Data.GI.CodeGen.Util
 
 import Text.Show.Pretty (ppShow)
-
--- | Whether to expose closures and the associated destroy notify
--- handlers in the Haskell wrapper.
-data ExposeClosures = WithClosures
-                    | WithoutClosures
 
 hOutType :: Callable -> [Arg] -> ExcCodeGen TypeRep
 hOutType callable outArgs = do
@@ -120,19 +113,19 @@ wrapMaybe arg = if mayBeNull arg
                 then typeIsNullable (argType arg)
                 else return False
 
--- Given the list of arguments returns the list of constraints and the
+-- | Given the list of arguments returns the list of constraints and the
 -- list of types in the signature.
-inArgInterfaces :: [Arg] -> ExcCodeGen ([Text], [Text])
-inArgInterfaces inArgs = consAndTypes (['a'..'z'] \\ ['m']) inArgs
-  where
-    consAndTypes :: [Char] -> [Arg] -> ExcCodeGen ([Text], [Text])
-    consAndTypes _ [] = return ([], [])
-    consAndTypes letters (arg:args) = do
-      (ls, t, cons) <- argumentType letters $ argType arg
-      t' <- wrapMaybe arg >>= bool (return t)
-                                   (return $ "Maybe (" <> t <> ")")
-      (restCons, restTypes) <- consAndTypes ls args
-      return (cons <> restCons, t' : restTypes)
+inArgInterfaces :: [Arg] -> ExposeClosures -> ExcCodeGen ([Text], [Text])
+inArgInterfaces args expose = do
+  resetTypeVariableScope
+  go args
+  where go [] = return ([], [])
+        go (arg:args) = do
+          (t, cons) <- argumentType (argType arg) expose
+          t' <- wrapMaybe arg >>= bool (return t)
+            (return $ "Maybe (" <> t <> ")")
+          (restCons, restTypes) <- go args
+          return (cons <> restCons, t' : restTypes)
 
 -- Given a callable, return a list of (array, length) pairs, where in
 -- each pair "length" is the argument holding the length of the
@@ -261,22 +254,24 @@ freeInArgs' freeFn callable nameMap = concat <$> actions
                          _ -> undefined
           Nothing -> badIntroError $ "freeInArgs: do not understand " <> tshow arg
 
--- Return the list of actions freeing the memory associated with the
+-- | Return the list of actions freeing the memory associated with the
 -- callable variables. This is run if the call to the C function
 -- succeeds, if there is an error freeInArgsOnError below is called
 -- instead.
+freeInArgs :: Callable -> Map.Map Text Text -> ExcCodeGen [Text]
 freeInArgs = freeInArgs' freeInArg
 
--- Return the list of actions freeing the memory associated with the
+-- | Return the list of actions freeing the memory associated with the
 -- callable variables. This is run in case there is an error during
 -- the call.
+freeInArgsOnError :: Callable -> Map.Map Text Text -> ExcCodeGen [Text]
 freeInArgsOnError = freeInArgs' freeInArgOnError
 
 -- Marshall the haskell arguments into their corresponding C
 -- equivalents. omitted gives a list of DirectionIn arguments that
 -- should be ignored, as they will be dealt with separately.
-prepareArgForCall :: [Arg] -> Arg -> ExcCodeGen Text
-prepareArgForCall omitted arg = do
+prepareArgForCall :: [Arg] -> Arg -> ExposeClosures -> ExcCodeGen Text
+prepareArgForCall omitted arg expose = do
   callback <- findAPI (argType arg) >>=
                 \case Just (APICallback c) -> return (Just c)
                       _ -> return Nothing
@@ -291,7 +286,7 @@ prepareArgForCall omitted arg = do
                         Just c -> if callableThrows (cbCallable c)
                                   -- See [Note: Callables that throw]
                                   then return (escapedArgName arg)
-                                  else prepareInCallback arg c
+                                  else prepareInCallback arg c expose
                         Nothing -> prepareInArg arg
     DirectionInout -> prepareInoutArg arg
     DirectionOut -> prepareOutArg arg
@@ -315,17 +310,18 @@ prepareInArg arg = do
                 return maybeName)
 
 -- | Callbacks are a fairly special case, we treat them separately.
-prepareInCallback :: Arg -> Callback -> CodeGen Text
-prepareInCallback arg (Callback {cbCallable = cb}) = do
+prepareInCallback :: Arg -> Callback -> ExposeClosures -> CodeGen Text
+prepareInCallback arg callback@(Callback {cbCallable = cb}) expose = do
   let name = escapedArgName arg
       ptrName = "ptr" <> name
       scope = argScope arg
 
   (maker, wrapper, drop) <-
       case argType arg of
-        TInterface tn@(Name _ n) ->
+        TInterface tn ->
             do
-              drop <- if callableHasClosures cb
+              let Name _ n = normalizedAPIName (APICallback callback) tn
+              drop <- if callableHasClosures cb && expose == WithoutClosures
                       then Just <$> qualifiedSymbol (callbackDropClosures n) tn
                       else return Nothing
               wrapper <- qualifiedSymbol (callbackHaskellToForeign n) tn
@@ -393,14 +389,11 @@ prepareInoutArg arg = do
   ft <- foreignType $ argType arg
   allocInfo <- typeAllocInfo (argType arg)
   case allocInfo of
-    Just (TypeAllocInfo isBoxed n) -> do
-         let allocator = if isBoxed
-                         then "callocBoxedBytes"
-                         else "callocBytes"
+    Just (TypeAlloc allocator n) -> do
          wrapMaybe arg >>= bool
             (do
               name'' <- genConversion (prime name') $
-                        literal $ M $ allocator <> " " <> tshow n <>
+                        literal $ M $ allocator <>
                                     " :: " <> typeShow (io ft)
               line $ "memcpy " <> name'' <> " " <> name' <> " " <> tshow n
               return name'')
@@ -423,17 +416,21 @@ prepareOutArg arg = do
   then do
     allocInfo <- typeAllocInfo (argType arg)
     case allocInfo of
-      Just (TypeAllocInfo isBoxed n) -> do
-          let allocator = if isBoxed
-                          then "callocBoxedBytes"
-                          else "callocBytes"
-          genConversion name $ literal $ M $ allocator <> " " <> tshow n <>
+      Just (TypeAlloc allocator _) -> do
+          genConversion name $ literal $ M $ allocator <>
                             " :: " <> typeShow (io ft)
       Nothing ->
           notImplementedError $ ("Don't know how to allocate \""
                                  <> argCName arg <> "\" of type "
                                  <> tshow (argType arg))
-  else genConversion name $ literal $ M $ "allocMem :: " <> typeShow (io $ ptr ft)
+  else do
+    -- Initialize pointers to NULL to avoid a crash in case the function
+    -- does not initialize it.
+    isPtr <- typeIsPtr (argType arg)
+    let alloc = if isPtr
+                then "callocMem"
+                else "allocMem"
+    genConversion name $ literal $ M $ alloc <> " :: " <> typeShow (io $ ptr ft)
 
 -- Convert a non-zero terminated out array, stored in a variable
 -- named "aname", into the corresponding Haskell object.
@@ -444,7 +441,7 @@ convertOutCArray callable t@(TCArray False fixed length _) aname
   if fixed > -1
   then do
     unpacked <- convert aname $ unpackCArray (tshow fixed) t transfer
-    -- Free the memory associated with the array
+    -- Free the memory associated with the array.
     freeContainerType transfer t aname undefined
     return unpacked
   else do
@@ -458,7 +455,7 @@ convertOutCArray callable t@(TCArray False fixed length _) aname
                                             lname
     let lname'' = primeLength lname'
     unpacked <- convert aname $ unpackCArray lname'' t transfer
-    -- Free the memory associated with the array
+    -- Free the memory associated with the array.
     freeContainerType transfer t aname lname''
     return unpacked
 
@@ -532,9 +529,9 @@ prepareClosures callable nameMap = do
   forM_ closures $ \closure ->
       case Map.lookup closure m of
         Nothing -> badIntroError $ "Closure not found! "
-                                <> T.pack (ppShow callable)
-                                <> "\n" <> T.pack (ppShow m)
-                                <> "\n" <> tshow closure
+                                <> "\nClosure: " <> tshow closure
+                                <> "\nc2cm: " <> T.pack (ppShow m)
+                                <> "\ncallable: " <> T.pack (ppShow callable)
         Just cb -> do
           let closureName = escapedArgName $ (args callable)!!closure
               n = escapedArgName cb
@@ -543,21 +540,40 @@ prepareClosures callable nameMap = do
                   Nothing -> badIntroError $ "Cannot find closure name!! "
                                            <> T.pack (ppShow callable) <> "\n"
                                            <> T.pack (ppShow nameMap)
-          case argScope cb of
-            ScopeTypeInvalid -> badIntroError $ "Invalid scope! "
+          -- Check that the given closure is an actual callback type.
+          maybeAPI <- findAPI (argType cb)
+          case maybeAPI of
+            Just (APICallback _) -> do
+              case argScope cb of
+                ScopeTypeInvalid -> badIntroError $ "Invalid scope! "
                                               <> T.pack (ppShow callable)
-            ScopeTypeNotified -> do
-                line $ "let " <> closureName <> " = castFunPtrToPtr " <> n'
-                case argDestroy cb of
-                  (-1) -> badIntroError $
-                          "ScopeTypeNotified without destructor! "
-                           <> T.pack (ppShow callable)
-                  k -> let destroyName =
-                            escapedArgName $ (args callable)!!k in
-                       line $ "let " <> destroyName <> " = safeFreeFunPtrPtr"
-            ScopeTypeAsync ->
-                line $ "let " <> closureName <> " = nullPtr"
-            ScopeTypeCall -> line $ "let " <> closureName <> " = nullPtr"
+                ScopeTypeNotified -> do
+                  line $ "let " <> closureName <> " = castFunPtrToPtr " <> n'
+                  case argDestroy cb of
+                    (-1) -> badIntroError $
+                            "ScopeTypeNotified without destructor! "
+                            <> T.pack (ppShow callable)
+                    k -> do
+                      let destroyArg = (args callable)!!k
+                          destroyName = escapedArgName destroyArg
+                      destroyFun <- case argType destroyArg of
+                        TInterface (Name "GLib" "DestroyNotify") ->
+                          return "SP.safeFreeFunPtrPtr"
+                        TInterface (Name "GObject" "ClosureNotify") ->
+                          return "SP.safeFreeFunPtrPtr'"
+                        _ -> notImplementedError $ "Unknown destroy type: " <> tshow (argType destroyArg)
+                      line $ "let " <> destroyName <> " = " <> destroyFun
+                ScopeTypeAsync -> do
+                  line $ "let " <> closureName <> " = nullPtr"
+                  case argDestroy cb of
+                    -- Async callbacks don't really need destroy
+                    -- notifications, as they can always be released
+                    -- at the end of the callback.
+                    (-1) -> return ()
+                    n -> let destroyName = escapedArgName $ (args callable)!!n
+                         in line $ "let " <> destroyName <> " = FP.nullFunPtr"
+                ScopeTypeCall -> line $ "let " <> closureName <> " = nullPtr"
+            _ -> badIntroError $ "Closure \"" <> n <> "\" is not a callback."
 
 freeCallCallbacks :: Callable -> Map.Map Text Text -> ExcCodeGen ()
 freeCallCallbacks callable nameMap =
@@ -572,9 +588,9 @@ freeCallCallbacks callable nameMap =
             line $ "safeFreeFunPtr $ castFunPtrToPtr " <> name'
 
 -- | Format the signature of the Haskell binding for the `Callable`.
-formatHSignature :: Callable -> ForeignSymbol -> ExcCodeGen ()
-formatHSignature callable symbol = do
-  sig <- callableSignature callable symbol
+formatHSignature :: Callable -> ForeignSymbol -> ExposeClosures -> ExcCodeGen ()
+formatHSignature callable symbol expose = do
+  sig <- callableSignature callable symbol expose
   indent $ do
       let constraints = "B.CallStack.HasCallStack" : signatureConstraints sig
       line $ "(" <> T.intercalate ", " constraints <> ") =>"
@@ -603,13 +619,14 @@ data Signature = Signature { signatureCallable    :: Callable
 
 -- | The Haskell signature for the given callable. It returns a tuple
 -- ([constraints], [(type, argname)]).
-callableSignature :: Callable -> ForeignSymbol -> ExcCodeGen Signature
-callableSignature callable symbol = do
+callableSignature :: Callable -> ForeignSymbol -> ExposeClosures
+                  -> ExcCodeGen Signature
+callableSignature callable symbol expose = do
   let (hInArgs, _) = callableHInArgs callable
                                     (case symbol of
                                        KnownForeignSymbol _ -> WithoutClosures
                                        DynamicForeignSymbol _ -> WithClosures)
-  (argConstraints, types) <- inArgInterfaces hInArgs
+  (argConstraints, types) <- inArgInterfaces hInArgs expose
   let constraints = ("MonadIO m" : argConstraints)
   outType <- hOutType callable (callableHOutArgs callable)
   return $ Signature {
@@ -788,23 +805,24 @@ genHaskellWrapper n symbol callable expose = group $ do
         hOutArgs = callableHOutArgs callable
 
     line $ name <> " ::"
-    formatHSignature callable symbol
+    formatHSignature callable symbol expose
     let argNames = case symbol of
                      KnownForeignSymbol _ -> map escapedArgName hInArgs
                      DynamicForeignSymbol _ ->
                          funPtr : map escapedArgName hInArgs
     line $ name <> " " <> T.intercalate " " argNames <> " = liftIO $ do"
-    indent (genWrapperBody n symbol callable hInArgs hOutArgs omitted)
+    indent (genWrapperBody n symbol callable hInArgs hOutArgs omitted expose)
     return name
 
 -- | Generate the body of the Haskell wrapper for the given foreign symbol.
 genWrapperBody :: Name -> ForeignSymbol -> Callable ->
                   [Arg] -> [Arg] -> [Arg] ->
+                  ExposeClosures ->
                   ExcCodeGen ()
-genWrapperBody n symbol callable hInArgs hOutArgs omitted = do
+genWrapperBody n symbol callable hInArgs hOutArgs omitted expose = do
     readInArrayLengths n callable hInArgs
     inArgNames <- forM (args callable) $ \arg ->
-                  prepareArgForCall omitted arg
+                  prepareArgForCall omitted arg expose
     -- Map from argument names to names passed to the C function
     let nameMap = Map.fromList $ flip zip inArgNames
                                $ map escapedArgName $ args callable
@@ -859,7 +877,8 @@ fixupCallerAllocates c =
           fixupDir a = case argType a of
                          TCArray _ _ l _ ->
                              if argCallerAllocates a && l > -1
-                             then a {direction = DirectionInout}
+                             then a { direction = DirectionInout
+                                    , transfer = TransferEverything }
                              else a
                          _ -> a
 
@@ -895,30 +914,46 @@ data DynamicWrapper = DynamicWrapper {
 genCallableDebugInfo :: Callable -> CodeGen ()
 genCallableDebugInfo callable =
     group $ do
-      line $ "-- Args : " <> (tshow $ args callable)
-      line $ "-- Lengths : " <> (tshow $ arrayLengths callable)
-      line $ "-- returnType : " <> (tshow $ returnType callable)
+      commentShow "Args" (args callable)
+      commentShow "Lengths" (arrayLengths callable)
+      commentShow "returnType" (returnType callable)
       line $ "-- throws : " <> (tshow $ callableThrows callable)
       line $ "-- Skip return : " <> (tshow $ skipReturn callable)
       when (skipReturn callable && returnType callable /= Just (TBasicType TBoolean)) $
            do line "-- XXX return value ignored, but it is not a boolean."
               line "--     This may be a memory leak?"
+  where commentShow :: Show a => Text -> a -> CodeGen ()
+        commentShow prefix s =
+          let padding = T.replicate (T.length prefix + 2) " "
+              padded = case T.lines (T.pack $ ppShow s) of
+                         [] -> []
+                         (f:rest) -> "-- " <> prefix <> ": " <> f :
+                                     map (("-- " <> padding) <>) rest
+          in mapM_ line padded
 
 -- | Generate a wrapper for a known C symbol.
 genCCallableWrapper :: Name -> Text -> Callable -> ExcCodeGen ()
-genCCallableWrapper n cSymbol callable = do
-  genCallableDebugInfo callable
+genCCallableWrapper n cSymbol callable
+  | callableResolvable callable == Nothing =
+      -- If we reach this point there is some internal error.
+      terror ("Resolvability of “" <> cSymbol <> "” unkown.")
+  | callableResolvable callable == Just False =
+      badIntroError ("Could not resolve the symbol “" <> cSymbol
+                     <> "” in the “" <> namespace n
+                     <> "” namespace, ignoring.")
+  | otherwise = do
+      genCallableDebugInfo callable
 
-  let callable' = fixupCallerAllocates callable
+      let callable' = fixupCallerAllocates callable
 
-  hSymbol <- mkForeignImport cSymbol callable'
+      hSymbol <- mkForeignImport cSymbol callable'
 
-  blank
+      blank
 
-  deprecatedPragma (lowerName n) (callableDeprecated callable)
-  writeDocumentation DocBeforeSymbol (callableDocumentation callable)
-  void (genHaskellWrapper n (KnownForeignSymbol hSymbol) callable'
-         WithoutClosures)
+      deprecatedPragma (lowerName n) (callableDeprecated callable)
+      writeDocumentation DocBeforeSymbol (callableDocumentation callable)
+      void (genHaskellWrapper n (KnownForeignSymbol hSymbol) callable'
+            WithoutClosures)
 
 -- | For callbacks we do not need to keep track of which arguments are
 -- closures.

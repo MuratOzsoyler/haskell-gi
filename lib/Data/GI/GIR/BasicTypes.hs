@@ -54,6 +54,7 @@ data Type
     = TBasicType BasicType
     | TError           -- ^ GError
     | TVariant         -- ^ GVariant
+    | TGValue          -- ^ GValue
     | TParamSpec       -- ^ GParamSpec
     | TCArray Bool Int Int Type  -- ^ Zero terminated, Array Fixed
                                  -- Size, Array Length, Element Type
@@ -63,5 +64,6 @@ data Type
     | TGList Type      -- ^ GList
     | TGSList Type     -- ^ GSList
     | TGHash Type Type -- ^ GHashTable
+    | TGClosure (Maybe Type) -- ^ GClosure containing the given API (if known)
     | TInterface Name  -- ^ A reference to some API in the GIR
       deriving (Eq, Show, Ord)

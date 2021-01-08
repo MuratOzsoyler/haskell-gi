@@ -3,10 +3,17 @@ module Data.GI.CodeGen.Fixups
     ( dropMovedItems
     , guessPropertyNullability
     , detectGObject
+    , dropDuplicatedFields
+    , checkClosureDestructors
+    , fixSymbolNaming
     ) where
 
+import Data.Char (generalCategory, GeneralCategory(UppercaseLetter))
 import Data.Maybe (isNothing, isJust)
+#if !MIN_VERSION_base(4,13,0)
 import Data.Monoid ((<>))
+#endif
+import qualified Data.Set as S
 import qualified Data.Text as T
 
 import Data.GI.CodeGen.API
@@ -130,3 +137,77 @@ detectGObject (n, APIInterface iface) =
                                         gobject : ifPrerequisites iface}))
   else (n, APIInterface iface)
 detectGObject api = api
+
+-- | Drop any fields whose name coincides with that of a previous
+-- element. Note that this function keeps ordering.
+dropDuplicatedEnumFields :: Enumeration -> Enumeration
+dropDuplicatedEnumFields enum =
+  enum{enumMembers = dropDuplicates S.empty (enumMembers enum)}
+  where dropDuplicates :: S.Set T.Text -> [EnumerationMember] -> [EnumerationMember]
+        dropDuplicates _        []     = []
+        dropDuplicates previous (m:ms) =
+          if enumMemberName m `S.member` previous
+          then dropDuplicates previous ms
+          else m : dropDuplicates (S.insert (enumMemberName m) previous) ms
+
+-- | Some libraries include duplicated flags by mistake, drop those.
+dropDuplicatedFields :: (Name, API) -> (Name, API)
+dropDuplicatedFields (n, APIFlags (Flags enum)) =
+  (n, APIFlags (Flags $ dropDuplicatedEnumFields enum))
+dropDuplicatedFields (n, api) = (n, api)
+
+-- | Sometimes arguments are marked as being a user_data destructor,
+-- but there is no associated user_data argument. In this case we drop
+-- the annotation.
+checkClosureDestructors :: (Name, API) -> (Name, API)
+checkClosureDestructors (n, APIObject o) =
+  (n, APIObject (o {objMethods = checkMethodDestructors (objMethods o)}))
+checkClosureDestructors (n, APIInterface i) =
+  (n, APIInterface (i {ifMethods = checkMethodDestructors (ifMethods i)}))
+checkClosureDestructors (n, APIStruct s) =
+  (n, APIStruct (s {structMethods = checkMethodDestructors (structMethods s)}))
+checkClosureDestructors (n, APIUnion u) =
+  (n, APIUnion (u {unionMethods = checkMethodDestructors (unionMethods u)}))
+checkClosureDestructors (n, APIFunction f) =
+  (n, APIFunction (f {fnCallable = checkCallableDestructors (fnCallable f)}))
+checkClosureDestructors (n, api) = (n, api)
+
+checkMethodDestructors :: [Method] -> [Method]
+checkMethodDestructors = map checkMethod
+  where checkMethod :: Method -> Method
+        checkMethod m = m {methodCallable =
+                             checkCallableDestructors (methodCallable m)}
+
+-- | If any argument for the callable has a associated destroyer for
+-- the user_data, but no associated user_data, drop the destroyer
+-- annotation.
+checkCallableDestructors :: Callable -> Callable
+checkCallableDestructors c = c {args = map checkArg (args c)}
+  where checkArg :: Arg -> Arg
+        checkArg arg = if argDestroy arg >= 0 && argClosure arg == -1
+                       then arg {argDestroy = -1}
+                       else arg
+
+-- | Some symbols have names that are not valid Haskell identifiers,
+-- fix that here.
+fixSymbolNaming :: (Name, API) -> (Name, API)
+fixSymbolNaming (n, APIConst c) = (fixConstantName n, APIConst c)
+fixSymbolNaming (n, api) = (n, api)
+
+-- | Make sure that the given name is a valid Haskell identifier in
+-- patterns.
+--
+-- === __Examples__
+-- >>> fixConstantName (Name "IBus" "0")
+-- Name {namespace = "IBus", name = "C'0"}
+--
+-- >>> fixConstantName (Name "IBus" "a")
+-- Name {namespace = "IBus", name = "C'a"}
+--
+-- >>> fixConstantName (Name "IBus" "A")
+-- Name {namespace = "IBus", name = "A"}
+fixConstantName :: Name -> Name
+fixConstantName (Name ns n)
+  | not (T.null n) && generalCategory (T.head n) /= UppercaseLetter
+  = Name ns ("C'" <> n)
+  | otherwise = Name ns n

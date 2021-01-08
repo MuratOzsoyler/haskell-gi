@@ -2,7 +2,7 @@
 module Data.GI.CodeGen.Overrides
     ( Overrides(pkgConfigMap, cabalPkgVersion, nsChooseVersion, girFixups,
                 onlineDocsMap)
-    , parseOverridesFile
+    , parseOverrides
     , filterAPIsAndDeps
     ) where
 
@@ -30,9 +30,9 @@ import qualified System.Info as SI
 import Data.GI.CodeGen.API
 import qualified Text.XML as XML
 import Data.GI.CodeGen.PkgConfig (tryPkgConfig)
-import Data.GI.CodeGen.Util (tshow)
+import Data.GI.CodeGen.Util (tshow, utf8ReadFile)
 import Data.GI.GIR.XMLUtils (xmlLocalName, xmlNSName,
-                             GIRXMLNamespace(CGIRNS, GLibGIRNS))
+                             GIRXMLNamespace(CGIRNS, GLibGIRNS, CoreGIRNS))
 
 data Overrides = Overrides {
       -- | Ignored elements of a given API.
@@ -84,6 +84,8 @@ instance Monoid Overrides where
 instance Sem.Semigroup Overrides where
   (<>) = concatOverrides
 
+-- | Addition of overrides is meaningful.
+concatOverrides :: Overrides -> Overrides -> Overrides
 concatOverrides a b = Overrides {
       ignoredAPIs = ignoredAPIs a <> ignoredAPIs b,
       sealedStructs = sealedStructs a <> sealedStructs b,
@@ -130,14 +132,13 @@ withFlags p = do
 -- encode this in a monad.
 type Parser a = WriterT Overrides (StateT ParserState (ExceptT Text IO)) a
 
--- | Parse the given config file (as a set of lines) for a given
--- introspection namespace, filling in the configuration as needed. In
--- case the parsing fails we return a description of the error
--- instead.
-parseOverridesFile :: [Text] -> IO (Either Text Overrides)
-parseOverridesFile ls =
-    runExceptT $ flip evalStateT emptyParserState $ execWriterT $
-              mapM (parseOneLine . T.strip) ls
+-- | Parse the given overrides, filling in the configuration as
+-- needed. In case the parsing fails we return a description of the
+-- error instead.
+parseOverrides :: Text -> IO (Either Text Overrides)
+parseOverrides overrides = do
+  runExceptT $ flip evalStateT emptyParserState $ execWriterT $
+    mapM (parseOneLine . T.strip) (T.lines overrides)
 
 -- | Parse a single line of the config file, modifying the
 -- configuration as appropriate.
@@ -162,6 +163,8 @@ parseOneLine (T.stripPrefix "namespace-version " -> Just s) =
     withFlags $ parseNsVersion s
 parseOneLine (T.stripPrefix "set-attr " -> Just s) =
     withFlags $ parseSetAttr s
+parseOneLine (T.stripPrefix "delete-attr " -> Just s) =
+    withFlags $ parseDeleteAttr s
 parseOneLine (T.stripPrefix "add-node " -> Just s) =
     withFlags $ parseAdd s
 parseOneLine (T.stripPrefix "delete-node " -> Just s) =
@@ -170,6 +173,7 @@ parseOneLine (T.stripPrefix "C-docs-url " -> Just u) =
     withFlags $ parseDocsUrl u
 parseOneLine (T.stripPrefix "if " -> Just s) = parseIf s
 parseOneLine (T.stripPrefix "endif" -> Just s) = parseEndif s
+parseOneLine (T.stripPrefix "include " -> Just s) = parseInclude s
 parseOneLine l = throwError $ "Could not understand \"" <> l <> "\"."
 
 -- | Ignored elements.
@@ -259,6 +263,17 @@ parseSetAttr t =
                "\t\"set-attr nodePath attrName newValue\"\n" <>
                "Got \"set-attr " <> t <> "\" instead.")
 
+-- | Delete the given attribute
+parseDeleteAttr :: Text -> Parser ()
+parseDeleteAttr (T.words -> [path, attr]) = do
+  pathSpec <- parsePathSpec path
+  parsedAttr <- parseXMLName attr
+  tell $ defaultOverrides {girFixups = [GIRDeleteAttr pathSpec parsedAttr]}
+parseDeleteAttr t =
+    throwError ("delete-attr syntax is of the form\n" <>
+               "\t\"delete-attr nodePath attrName\"\n" <>
+               "Got \"delete-attr " <> t <> "\" instead.")
+
 -- | Add the given child node to all nodes matching the path.
 parseAdd :: Text -> Parser ()
 parseAdd (T.words -> [path, name]) = do
@@ -316,6 +331,7 @@ parseXMLName a = case T.splitOn ":" a of
                    [n] -> return (xmlLocalName n)
                    ["c", n] -> return (xmlNSName CGIRNS n)
                    ["glib", n] -> return (xmlNSName GLibGIRNS n)
+                   ["core", n] -> return (xmlNSName CoreGIRNS n)
                    _ -> throwError ("Could not understand xml name \""
                                     <> a <> "\".")
 
@@ -387,6 +403,15 @@ parseEndif rest = case T.words rest of
             case flags s of
               _:rest -> put (s {flags = rest})
               [] -> throwError ("'endif' with no matching 'if'.")
+
+-- | Parse the given overrides file, and merge into the given context.
+parseInclude :: Text -> Parser ()
+parseInclude fname = do
+  includeText <- liftIO $ utf8ReadFile (T.unpack fname)
+  liftIO (parseOverrides includeText) >>= \case
+    Left err -> throwError ("Error when parsing included '"
+                            <> fname <> "': " <> err)
+    Right ovs -> tell ovs
 
 -- | Filter a set of named objects based on a lookup list of names to
 -- ignore.

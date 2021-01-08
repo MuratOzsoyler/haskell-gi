@@ -5,8 +5,11 @@ module Data.GI.CodeGen.EnumFlags
     ) where
 
 import Control.Monad (when, forM_)
+#if !MIN_VERSION_base(4,11,0)
 import Data.Monoid ((<>))
+#endif
 import Data.Text (Text)
+import qualified Data.Set as S
 
 import Foreign.C (CUInt)
 import Foreign.Storable (sizeOf)
@@ -17,6 +20,19 @@ import Data.GI.CodeGen.Haddock (deprecatedPragma, writeDocumentation,
                                 writeHaddock, RelativeDocPosition(..))
 import Data.GI.CodeGen.SymbolNaming (upperName)
 import Data.GI.CodeGen.Util (tshow)
+
+-- | Given a list of named enum members, filter out those that have
+-- the same value as a previous entry in the list.
+dropDuplicated :: [(Text, EnumerationMember)] -> [(Text, EnumerationMember)]
+dropDuplicated namedMembers = go namedMembers enumMemberValue S.empty
+  where go :: Ord c => [(a, b)] -> (b->c) -> S.Set c -> [(a, b)]
+        go [] _ _ = []
+        go ((n, m) : rest) f seen =
+          if S.member (f m) seen
+             -- already seen, discard
+          then go rest f seen
+          else (n,m) : go rest f (S.insert (f m) seen)
+
 
 genEnumOrFlags :: HaddockSection -> Name -> Enumeration -> ExcCodeGen ()
 genEnumOrFlags docSection n@(Name ns name) e = do
@@ -61,7 +77,7 @@ genEnumOrFlags docSection n@(Name ns name) e = do
             line $ "fromEnum (Another" <> name' <> " k) = k"
     blank
     indent $ do
-            forM_ members' $ \(n, m) ->
+            forM_ (dropDuplicated members') $ \(n, m) ->
                 line $ "toEnum " <> tshow (enumMemberValue m) <> " = " <> n
             line $ "toEnum k = Another" <> name' <> " k"
 
@@ -76,19 +92,28 @@ genBoxedEnum n typeInit = do
   let name' = upperName n
 
   group $ do
+    line $ "type instance O.ParentTypes " <> name' <> " = '[]"
+    bline $ "instance O.HasParentTypes " <> name'
+
+  group $ do
     line $ "foreign import ccall \"" <> typeInit <> "\" c_" <>
             typeInit <> " :: "
     indent $ line "IO GType"
   group $ do
-       bline $ "instance BoxedEnum " <> name' <> " where"
-       indent $ line $ "boxedEnumType _ = c_" <> typeInit
+       bline $ "instance B.Types.TypedObject " <> name' <> " where"
+       indent $ line $ "glibType = c_" <> typeInit
+
+  group $ do
+    bline $ "instance B.Types.BoxedEnum " <> name'
 
 genEnum :: Name -> Enumeration -> CodeGen ()
 genEnum n@(Name _ name) enum = do
   line $ "-- Enum " <> name
 
   let docSection = NamedSubsection EnumSection (upperName n)
-  handleCGExc (\e -> line $ "-- XXX Could not generate: " <> describeCGError e)
+  handleCGExc (\e -> do
+                  line $ "-- XXX Code Generation error"
+                  printCGError e)
               (do genEnumOrFlags docSection n enum
                   case enumTypeInit enum of
                     Nothing -> return ()
@@ -99,12 +124,19 @@ genBoxedFlags n typeInit = do
   let name' = upperName n
 
   group $ do
+    line $ "type instance O.ParentTypes " <> name' <> " = '[]"
+    bline $ "instance O.HasParentTypes " <> name'
+
+  group $ do
     line $ "foreign import ccall \"" <> typeInit <> "\" c_" <>
             typeInit <> " :: "
     indent $ line "IO GType"
   group $ do
-       bline $ "instance BoxedFlags " <> name' <> " where"
-       indent $ line $ "boxedFlagsType _ = c_" <> typeInit
+       bline $ "instance B.Types.TypedObject " <> name' <> " where"
+       indent $ line $ "glibType = c_" <> typeInit
+
+  group $ do
+    bline $ "instance B.Types.BoxedFlags " <> name'
 
 -- | Very similar to enums, but we also declare ourselves as members of
 -- the IsGFlag typeclass.
@@ -113,7 +145,9 @@ genFlags n@(Name _ name) (Flags enum) = do
   line $ "-- Flags " <> name
 
   let docSection = NamedSubsection FlagSection (upperName n)
-  handleCGExc (\e -> line $ "-- XXX Could not generate: " <> describeCGError e)
+  handleCGExc (\e -> do
+                  line "-- XXX Code generation error"
+                  printCGError e)
               (do
                 genEnumOrFlags docSection n enum
 

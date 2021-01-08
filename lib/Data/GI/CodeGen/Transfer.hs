@@ -11,7 +11,9 @@ import Control.Applicative ((<$>), (<*>))
 #endif
 
 import Control.Monad (when)
+#if !MIN_VERSION_base(4,11,0)
 import Data.Monoid ((<>))
+#endif
 import Data.Text (Text)
 
 import Data.GI.CodeGen.API
@@ -41,7 +43,9 @@ basicFreeFn (TGSList _) = Just "g_slist_free"
 basicFreeFn (TGHash _ _) = Just "unrefGHashTable"
 basicFreeFn (TError) = Nothing
 basicFreeFn (TVariant) = Nothing
+basicFreeFn (TGValue) = Nothing
 basicFreeFn (TParamSpec) = Nothing
+basicFreeFn (TGClosure _) = Nothing
 
 -- Basic free primitives in the case that an error occured. This is
 -- run in the exception handler, so any type which we ref/allocate
@@ -58,6 +62,14 @@ basicFreeFnOnError TVariant transfer =
 basicFreeFnOnError TParamSpec transfer =
     return $ if transfer == TransferEverything
              then Just "unrefGParamSpec"
+             else Nothing
+basicFreeFnOnError TGValue transfer =
+    return $ if transfer == TransferEverything
+             then Just "SP.freeMem"
+             else Nothing
+basicFreeFnOnError (TGClosure _) transfer =
+    return $ if transfer == TransferEverything
+             then Just "B.GClosure.unrefGClosure"
              else Nothing
 basicFreeFnOnError t@(TInterface _) transfer = do
   api <- findAPI t
@@ -225,15 +237,20 @@ freeOut label = return ["freeMem " <> label]
 -- transfer semantics of the callable).
 freeInArg :: Arg -> Text -> Text -> ExcCodeGen [Text]
 freeInArg arg label len = do
-  -- Arguments that we alloc ourselves do not need to be freed, they
-  -- will always be soaked up by the wrapPtr constructor, or they will
-  -- be DirectionIn.
-  if not (argCallerAllocates arg)
-  then case direction arg of
+  -- Arguments that we alloc ourselves do not always need to be freed,
+  -- they will sometimes be soaked up by the wrapPtr constructor, or
+  -- they will be DirectionIn.
+  if willWrap arg
+    then return []
+    else case direction arg of
          DirectionIn -> freeIn (transfer arg) (argType arg) label len
          DirectionOut -> freeOut label
          DirectionInout -> freeOut label
-  else return []
+
+  -- Whether memory ownership of the pointer passed in to the function
+  -- will be assumed by the C->Haskell wrapper.
+  where willWrap :: Arg -> Bool
+        willWrap = argCallerAllocates
 
 -- | Same thing as freeInArg, but called in case the call to C didn't
 -- succeed. We thus free everything we allocated in preparation for

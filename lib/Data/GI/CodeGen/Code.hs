@@ -24,7 +24,7 @@ module Data.GI.CodeGen.Code
     , recurseWithAPIs
 
     , handleCGExc
-    , describeCGError
+    , printCGError
     , notImplementedError
     , badIntroError
     , missingInfoError
@@ -35,14 +35,19 @@ module Data.GI.CodeGen.Code
     , line
     , blank
     , group
+    , comment
     , cppIf
     , CPPGuard(..)
     , hsBoot
     , submodule
     , setLanguagePragmas
+    , addLanguagePragma
     , setGHCOptions
     , setModuleFlags
     , setModuleMinBase
+
+    , getFreshTypeVariable
+    , resetTypeVariableScope
 
     , exportModule
     , exportDecl
@@ -71,7 +76,9 @@ import Control.Monad.State.Strict
 import Control.Monad.Except
 import qualified Data.Foldable as F
 import Data.Maybe (fromMaybe, catMaybes)
+#if !MIN_VERSION_base(4,13,0)
 import Data.Monoid ((<>), mempty)
+#endif
 import qualified Data.Map.Strict as M
 import Data.Sequence (ViewL ((:<)), viewl, (|>))
 import qualified Data.Sequence as Seq
@@ -81,6 +88,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy.Builder as B
 import qualified Data.Text.Lazy as LT
+
+import GHC.Stack (HasCallStack)
 
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (joinPath, takeDirectory)
@@ -120,6 +129,7 @@ data CodeToken
     = Line Text           -- ^ A single line, indented to current indentation.
     | Indent Code         -- ^ Indented region.
     | Group Code          -- ^ A grouped set of lines
+    | Comment [Text]      -- ^ A (possibly multi line) comment
     | IncreaseIndent      -- ^ Increase the indentation for the rest
                           -- of the lines in the group.
     | CPPBlock CPPConditional Code -- ^ A block of code guarded by the
@@ -233,12 +243,21 @@ data CGError = CGErrorNotImplemented Text
 data CGState = CGState {
   cgsCPPConditionals :: [CPPConditional] -- ^ Active CPP conditionals,
                                          -- outermost condition first.
+  , cgsNextAvailableTyvar :: NamedTyvar -- ^ Next unused type
+                                        -- variable.
   }
 
+-- | The name for a type variable.
+data NamedTyvar = SingleCharTyvar Char
+                -- ^ A single variable type variable: 'a', 'b', etc...
+                | IndexedTyvar Text Integer
+                -- ^ An indexed type variable: 'a17', 'key1', ...
+
 -- | Clean slate for `CGState`.
-emptyCGState = CGState {
-  cgsCPPConditionals = []
-  }
+emptyCGState :: CGState
+emptyCGState = CGState { cgsCPPConditionals = []
+                       , cgsNextAvailableTyvar = SingleCharTyvar 'a'
+                       }
 
 -- | The base type for the code generator monad.
 type BaseCodeGen excType a =
@@ -480,12 +499,14 @@ minBaseVersion minfo =
     maximum (moduleMinBase minfo
             : map minBaseVersion (M.elems $ submodules minfo))
 
--- | Give a friendly textual description of the error for presenting
--- to the user.
-describeCGError :: CGError -> Text
-describeCGError (CGErrorNotImplemented e) = "Not implemented: " <> tshow e
-describeCGError (CGErrorBadIntrospectionInfo e) = "Bad introspection data: " <> tshow e
-describeCGError (CGErrorMissingInfo e) = "Missing info: " <> tshow e
+-- | Print, as a comment, a friendly textual description of the error.
+printCGError :: CGError -> CodeGen ()
+printCGError (CGErrorNotImplemented e) = do
+  comment $ "Not implemented: " <> e
+printCGError (CGErrorBadIntrospectionInfo e) =
+  comment $ "Bad introspection data: " <> e
+printCGError (CGErrorMissingInfo e) =
+  comment $ "Missing info: " <> e
 
 notImplementedError :: Text -> ExcCodeGen a
 notImplementedError s = throwError $ CGErrorNotImplemented s
@@ -496,19 +517,41 @@ badIntroError s = throwError $ CGErrorBadIntrospectionInfo s
 missingInfoError :: Text -> ExcCodeGen a
 missingInfoError s = throwError $ CGErrorMissingInfo s
 
-findAPI :: Type -> CodeGen (Maybe API)
-findAPI TError = Just <$> findAPIByName (Name "GLib" "Error")
+-- | Get a type variable unused in the current scope.
+getFreshTypeVariable :: CodeGen Text
+getFreshTypeVariable = do
+  (cgs@(CGState{cgsNextAvailableTyvar = available}), s) <- get
+  let (tyvar, next) =
+        case available of
+          SingleCharTyvar char -> case char of
+            'z' -> ("z", IndexedTyvar "a" 0)
+            -- 'm' is reserved for the MonadIO constraint in signatures
+            'm' -> ("n", SingleCharTyvar 'o')
+            c -> (T.singleton c, SingleCharTyvar (toEnum $ fromEnum c + 1))
+          IndexedTyvar root index -> (root <> tshow index,
+                                      IndexedTyvar root (index+1))
+  put (cgs {cgsNextAvailableTyvar = next}, s)
+  return tyvar
+
+-- | Introduce a new scope for type variable naming: the next fresh
+-- variable will be called 'a'.
+resetTypeVariableScope :: CodeGen ()
+resetTypeVariableScope =
+  modify' (\(cgs, s) -> (cgs {cgsNextAvailableTyvar = SingleCharTyvar 'a'}, s))
+
+-- | Try to find the API associated with a given type, if known.
+findAPI :: HasCallStack => Type -> CodeGen (Maybe API)
 findAPI (TInterface n) = Just <$> findAPIByName n
 findAPI _ = return Nothing
 
 -- | Find the API associated with a given type. If the API cannot be
 -- found this raises an `error`.
-getAPI :: Type -> CodeGen API
+getAPI :: HasCallStack => Type -> CodeGen API
 getAPI t = findAPI t >>= \case
            Just a -> return a
            Nothing -> terror ("Could not resolve type \"" <> tshow t <> "\".")
 
-findAPIByName :: Name -> CodeGen API
+findAPIByName :: HasCallStack => Name -> CodeGen API
 findAPIByName n@(Name ns _) = do
     apis <- getAPIs
     case M.lookup n apis of
@@ -533,6 +576,10 @@ bline l = hsBoot (line l) >> line l
 -- | A blank line
 blank :: CodeGen ()
 blank = line ""
+
+-- | A (possibly multi line) comment, separated by newlines
+comment :: Text -> CodeGen ()
+comment = tellCode . Comment . T.lines
 
 -- | Increase the indent level for code generation.
 indent :: BaseCodeGen e a -> BaseCodeGen e a
@@ -562,8 +609,8 @@ cppIfBlock cond cg = do
   blank
   return x
     where addConditional :: CGState -> CGState
-          addConditional cgs = CGState {cgsCPPConditionals = CPPIf cond :
-                                         cgsCPPConditionals cgs}
+          addConditional cgs = cgs {cgsCPPConditionals = CPPIf cond :
+                                                         cgsCPPConditionals cgs}
 
 -- | Possible features to test via CPP.
 data CPPGuard = CPPOverloading -- ^ Enable overloading
@@ -571,7 +618,7 @@ data CPPGuard = CPPOverloading -- ^ Enable overloading
 -- | Guard a code block with CPP code, such that it is included only
 -- if the specified feature is enabled.
 cppIf :: CPPGuard -> BaseCodeGen e a -> BaseCodeGen e a
-cppIf CPPOverloading = cppIfBlock "ENABLE_OVERLOADING"
+cppIf CPPOverloading = cppIfBlock "defined(ENABLE_OVERLOADING)"
 
 -- | Write the given code into the .hs-boot file for the current module.
 hsBoot :: BaseCodeGen e a -> BaseCodeGen e a
@@ -607,6 +654,12 @@ export s n = exportPartial (Export (ExportSymbol s) n)
 setLanguagePragmas :: [Text] -> CodeGen ()
 setLanguagePragmas ps =
     modify' $ \(cgs, s) -> (cgs, s{modulePragmas = Set.fromList ps})
+
+-- | Add a language pragma for the current module.
+addLanguagePragma :: Text -> CodeGen ()
+addLanguagePragma p =
+  modify' $ \(cgs, s) -> (cgs, s{modulePragmas =
+                                 Set.insert p (modulePragmas s)})
 
 -- | Set the GHC options for compiling this module (in a OPTIONS_GHC pragma).
 setGHCOptions :: [Text] -> CodeGen ()
@@ -644,16 +697,28 @@ codeToText (Code seq) = LT.toStrict . B.toLazyText $ genCode 0 (viewl seq)
                                       genCode n (viewl rest)
         genCode n (Group (Code seq) :< rest) = genCode n (viewl seq) <>
                                                genCode n (viewl rest)
+        genCode n (Comment [] :< rest) = genCode n (viewl rest)
+        genCode n (Comment [s] :< rest) =
+          B.fromText (paddedLine n ("-- " <> s)) <> genCode n (viewl rest)
+        genCode n (Comment (l:ls):< rest) =
+          B.fromText ("{-  " <> l <> "\n" <>
+                      paddedLines (n+1) ls <> "-}\n") <> genCode n (viewl rest)
         genCode n (CPPBlock cond (Code seq) :< rest) =
           let (condBegin, condEnd) = cppCondFormat cond
           in B.fromText condBegin <> genCode n (viewl seq) <>
              B.fromText condEnd <> genCode n (viewl rest)
         genCode n (IncreaseIndent :< rest) = genCode (n+1) (viewl rest)
 
--- | Pad a line to the given number of leading spaces, and add a
--- newline at the end.
+-- | Pad a line to the given number of leading tabs (with one tab
+-- equal to four spaces), and add a newline at the end.
 paddedLine :: Int -> Text -> Text
 paddedLine n s = T.replicate (n * 4) " " <> s <> "\n"
+
+-- | Pad a set of lines to the given number of leading tabs (with one
+-- tab equal to four spaces), and add a newline at the end of each
+-- line.
+paddedLines :: Int -> [Text] -> Text
+paddedLines n ls = mconcat $ map (paddedLine n) ls
 
 -- | Put a (padded) comma at the end of the text.
 comma :: Text -> Text
@@ -745,7 +810,7 @@ formatSection section exports =
                                                    " #" <> anchor <> "#"
                                     Nothing -> subsectionTitle subsec
                     , case subsectionDoc subsec of
-                        Just text -> "{- | " <> text  <> "\n-}"
+                        Just text -> formatHaddockComment text
                         Nothing -> ""
                     , ( T.concat
                       . map (formatExport exportSymbol)
@@ -788,10 +853,10 @@ ghcOptions opts = "{-# OPTIONS_GHC " <> T.intercalate ", " opts <> " #-}\n"
 
 -- | Generate some convenience CPP macros.
 cppMacros :: Text
-cppMacros = T.unlines ["#define ENABLE_OVERLOADING (MIN_VERSION_haskell_gi_overloading(1,0,0) \\"
-                      -- Haddocks look better without overloading
-                      , "       && !defined(__HADDOCK_VERSION__))"
-                      ]
+cppMacros = T.unlines
+  ["#if (MIN_VERSION_haskell_gi_overloading(1,0,0) && !defined(__HADDOCK_VERSION__))"
+  , "#define ENABLE_OVERLOADING"
+  , "#endif"]
 
 -- | Standard fields for every module.
 standardFields :: Text
@@ -801,9 +866,17 @@ standardFields = T.unlines [ "Copyright  : " <> authors
 
 -- | The haddock header for the module, including optionally a description.
 moduleHaddock :: Maybe Text -> Text
-moduleHaddock Nothing = T.unlines ["{- |", standardFields <> "-}"]
-moduleHaddock (Just description) = T.unlines ["{- |", standardFields,
-                                              description, "-}"]
+moduleHaddock Nothing = formatHaddockComment $ standardFields
+moduleHaddock (Just description) =
+  formatHaddockComment $ T.unlines [standardFields, description]
+
+-- | Format the comment with the module documentation.
+formatHaddockComment :: Text -> Text
+formatHaddockComment doc = let lines = case T.lines doc of
+                                 [] -> []
+                                 (first:rest) -> ("-- | " <> first) :
+                                                 map ("-- " <>) rest
+                          in T.unlines lines
 
 -- | Generic module prelude. We reexport all of the submodules.
 modulePrelude :: M.Map HaddockSection Text -> Text -> [Export] -> [Text] -> Text
@@ -851,16 +924,23 @@ moduleImports = T.unlines [
                 , "import qualified Prelude as P"
                 , ""
                 , "import qualified Data.GI.Base.Attributes as GI.Attributes"
+                , "import qualified Data.GI.Base.BasicTypes as B.Types"
                 , "import qualified Data.GI.Base.ManagedPtr as B.ManagedPtr"
+                , "import qualified Data.GI.Base.GArray as B.GArray"
+                , "import qualified Data.GI.Base.GClosure as B.GClosure"
                 , "import qualified Data.GI.Base.GError as B.GError"
                 , "import qualified Data.GI.Base.GVariant as B.GVariant"
                 , "import qualified Data.GI.Base.GValue as B.GValue"
                 , "import qualified Data.GI.Base.GParamSpec as B.GParamSpec"
                 , "import qualified Data.GI.Base.CallStack as B.CallStack"
+                , "import qualified Data.GI.Base.Properties as B.Properties"
+                , "import qualified Data.GI.Base.Signals as B.Signals"
+                , "import qualified Control.Monad.IO.Class as MIO"
                 , "import qualified Data.Text as T"
                 , "import qualified Data.ByteString.Char8 as B"
                 , "import qualified Data.Map as Map"
-                , "import qualified Foreign.Ptr as FP" ]
+                , "import qualified Foreign.Ptr as FP"
+                , "import qualified GHC.OverloadedLabels as OL" ]
 
 -- | Like `dotModulePath`, but add a "GI." prefix.
 dotWithPrefix :: ModulePath -> Text

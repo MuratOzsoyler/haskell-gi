@@ -1,20 +1,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies, DataKinds #-}
 -- | A minimal wrapper for libgirepository.
 module Data.GI.CodeGen.LibGIRepository
     ( girRequire
+    , Typelib
     , setupTypelibSearchPath
     , FieldInfo(..)
     , girStructFieldInfo
     , girUnionFieldInfo
     , girLoadGType
+    , girIsSymbolResolvable
     ) where
 
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative ((<$>))
 #endif
 
-import Control.Monad (forM, when, (>=>))
+import Control.Monad (forM, (>=>))
 import qualified Data.Map as M
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -26,17 +30,26 @@ import System.Environment (lookupEnv)
 import System.FilePath (searchPathSeparator)
 
 import Data.GI.Base.BasicConversions (withTextCString, cstringToText)
-import Data.GI.Base.BasicTypes (BoxedObject(..), GType(..), CGType, ManagedPtr)
+import Data.GI.Base.BasicTypes (TypedObject(..), GBoxed,
+                                GType(..), CGType, ManagedPtr)
 import Data.GI.Base.GError (GError, checkGError)
 import Data.GI.Base.ManagedPtr (wrapBoxed, withManagedPtr)
+import Data.GI.Base.Overloading (HasParentTypes, ParentTypes)
 import Data.GI.Base.Utils (allocMem, freeMem)
 import Data.GI.CodeGen.Util (splitOn)
 
 -- | Wrapper for 'GIBaseInfo'
 newtype BaseInfo = BaseInfo (ManagedPtr BaseInfo)
 
--- | Wrapper for 'GITypelib'
-newtype Typelib = Typelib (Ptr Typelib)
+-- | Wrapper for 'GITypelib', remembering the originating namespace
+-- and version.
+data Typelib = Typelib { typelibNamespace       :: Text
+                       , typelibVersion         :: Text
+                       , _typelibPtr            :: Ptr Typelib
+                       }
+
+instance Show Typelib where
+  show t = T.unpack (typelibNamespace t) ++ "-" ++ T.unpack (typelibVersion t)
 
 -- | Extra info about a field in a struct or union which is not easily
 -- determined from the GIR file. (And which we determine by using
@@ -45,10 +58,18 @@ data FieldInfo = FieldInfo {
       fieldInfoOffset    :: Int
     }
 
+-- | The (empty) set of parent types for `BaseInfo` visible to the
+-- Haskell type system.
+instance HasParentTypes BaseInfo
+type instance ParentTypes BaseInfo = '[]
+
 foreign import ccall "g_base_info_gtype_get_type" c_g_base_info_gtype_get_type :: IO GType
 
-instance BoxedObject BaseInfo where
-    boxedType _ = c_g_base_info_gtype_get_type
+instance TypedObject BaseInfo where
+  glibType = c_g_base_info_gtype_get_type
+
+-- | `BaseInfo`s are registered as boxed in the GLib type system.
+instance GBoxed BaseInfo
 
 foreign import ccall "g_irepository_prepend_search_path" g_irepository_prepend_search_path :: CString -> IO ()
 
@@ -82,10 +103,11 @@ girRequire ns version =
     withTextCString ns $ \cns ->
     withTextCString version $ \cversion -> do
         typelib <- checkGError (g_irepository_require nullPtr cns cversion 0)
-                               (error $ "Could not load typelib for "
-                                          ++ show ns ++ " version "
-                                          ++ show version)
-        return (Typelib typelib)
+                               (\gerror -> error $ "Could not load typelib for "
+                                           ++ show ns ++ " version "
+                                           ++ show version ++ ".\n"
+                                           ++ "Error was: " ++ show gerror)
+        return (Typelib ns version typelib)
 
 foreign import ccall "g_irepository_find_by_name" g_irepository_find_by_name ::
     Ptr () -> CString -> CString -> IO (Ptr BaseInfo)
@@ -154,28 +176,40 @@ girUnionFieldInfo ns name = do
 foreign import ccall "g_typelib_symbol" g_typelib_symbol ::
     Ptr Typelib -> CString -> Ptr (FunPtr a) -> IO CInt
 
--- | Load a symbol from the dynamic library associated to the given namespace.
-girSymbol :: forall a. Text -> Text -> IO (FunPtr a)
-girSymbol ns symbol = do
-  typelib <- withTextCString ns $ \cns ->
-                    checkGError (g_irepository_require nullPtr cns nullPtr 0)
-                                (error $ "Could not load typelib " ++ show ns)
+-- | Try to load a symbol from the dynamic library associated to the
+-- given typelib.
+girLookupSymbol :: forall a. Typelib -> Text -> IO (Maybe (FunPtr a))
+girLookupSymbol (Typelib _ _ typelib) symbol = do
   funPtrPtr <- allocMem :: IO (Ptr (FunPtr a))
   result <- withTextCString symbol $ \csymbol ->
                       g_typelib_symbol typelib csymbol funPtrPtr
-  when (result /= 1) $
-       error ("Could not resolve symbol " ++ show symbol ++ " in namespace "
-              ++ show ns)
   funPtr <- peek funPtrPtr
   freeMem funPtrPtr
-  return funPtr
+  if result /= 1
+    then return Nothing
+    else return (Just funPtr)
+
+-- | Load a symbol from the dynamic library associated to the given
+-- typelib. If the symbol does not exist this will raise an error.
+girSymbol :: Typelib -> Text -> IO (FunPtr a)
+girSymbol typelib@(Typelib ns version _) symbol = do
+  maybeSymbol <- girLookupSymbol typelib symbol
+  case maybeSymbol of
+    Just funPtr -> return funPtr
+    Nothing -> error ("Could not resolve symbol " ++ show symbol ++ " in namespace "
+              ++ show (ns <> "-" <> version))
 
 type GTypeInit = IO CGType
 foreign import ccall "dynamic" gtypeInit :: FunPtr GTypeInit -> GTypeInit
 
--- | Load a GType given the namespace where it lives and the type init
+-- | Load a GType given the `Typelib` where it lives and the type init
 -- function.
-girLoadGType :: Text -> Text -> IO GType
-girLoadGType ns typeInit = do
-  funPtr <- girSymbol ns typeInit
-  GType <$> gtypeInit funPtr
+girLoadGType :: Typelib -> Text -> IO GType
+girLoadGType typelib typeInit =
+  GType <$> (girSymbol typelib typeInit >>= gtypeInit)
+
+-- | Check whether a symbol is present in the dynamical liberary.
+girIsSymbolResolvable :: Typelib -> Text -> IO Bool
+girIsSymbolResolvable typelib symbol = do
+  maybeSymbol <- girLookupSymbol typelib symbol
+  return (isJust maybeSymbol)

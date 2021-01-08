@@ -3,13 +3,14 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
--- A simple DBus server
+-- A simple DBus server. See examples/WebKit/DBusHelpers.hs for a more
+-- advanced example. To run the "factor" method in the server you can use
+-- https://wiki.gnome.org/Apps/DFeet.
 
 import qualified GI.GLib as GLib
 import qualified GI.Gio as Gio
 
 import Data.GI.Base
-import Data.Monoid ((<>))
 import Data.Text (Text)
 import Data.Word (Word32)
 
@@ -57,9 +58,9 @@ onBusAcquired connection _ = do
 ownBus :: IO Word32
 ownBus = do
   putStrLn "Owning name"
-  ba <- Just <$> Gio.genClosure_BusAcquiredCallback onBusAcquired
+  ba <- Gio.genClosure_BusAcquiredCallback onBusAcquired
   Gio.busOwnName Gio.BusTypeSession "test.haskellGI.factor"
-     [] ba Nothing Nothing
+     [] (Just ba) Nothing Nothing
 
 main :: IO ()
 main = do
